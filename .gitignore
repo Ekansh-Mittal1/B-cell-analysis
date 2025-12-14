@@ -1,0 +1,118 @@
+# Data files - input and output
+*.fasta
+*.fa
+*.fastq
+*.fq
+
+# Tabular data files
+*.csv
+*.tsv
+*.tab
+
+# BLAST output files
+*.fmt7
+*.out
+
+# Log and text output files
+*.log
+*.txt
+!README.md
+!setup/install.sh
+!setup/install_igphyml.sh
+
+# Image output files
+*.png
+
+# Generated directories
+build-trees-input/
+clean_fasta/
+clean_db_files/
+trees/
+*.dSYM/
+
+# All output files directory
+outs/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Editor swap files
+*.swp
+*~.swp
+.*.swp
+
+# Old code directory (replaced by src/)
+code/
+
+# Build artifacts
+.eggs/
+dist/
+build/
+*.egg-info/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# BLAST database files (generated)
+*.ndb
+*.nhr
+*.nin
+*.nog
+*.nsd
+*.nsi
+*.nsq
+*.nos
+*.not
+*.ntf
+*.nto
+*.phr
+*.pin
+*.pog
+*.psd
+*.psi
+*.psq
+
+# Keep reference database files in data/IMGT_Human_Database/
+!data/IMGT_Human_Database/*.fasta
+
+# Keep Database-Files directory and all its contents
+!data/Database-Files/
+!data/Database-Files/**
+
+# Keep reference internal_data files
+!data/internal_data/**/*.imgt
+!data/internal_data/**/*.kabat
+!data/internal_data/**/*.nhr
+!data/internal_data/**/*.nin
+!data/internal_data/**/*.nog
+!data/internal_data/**/*.nsd
+!data/internal_data/**/*.nsi
+!data/internal_data/**/*.nsq
+!data/internal_data/**/*.phr
+!data/internal_data/**/*.pin
+!data/internal_data/**/*.pog
+!data/internal_data/**/*.psd
+!data/internal_data/**/*.psi
+!data/internal_data/**/*.psq
+
+# Keep reference optional_data files
+!data/optional_data/**/*.aux
+
+# Keep bin executables
+!bin/**
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.backup
+

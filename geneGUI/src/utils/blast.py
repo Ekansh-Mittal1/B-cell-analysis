@@ -76,4 +76,4 @@ def blast_get_top_hits_v(input_fp, db_V_fp, db_J_fp, db_D_fp, organism='human'):
 
 
 # Test call removed - uncomment below to test locally
-# blast_get_top_hits_v("data/fasta_files/1018.fasta", "data/Database-Files/IGHV_clean.fasta", "data/Database-Files/IG_HKL_J_clean.fasta", "data/Database-Files/IGHD_clean.fasta")
+# blast_get_top_hits_v("fasta_files/1018.fasta", "Database-Files/IGHV_clean.fasta", "Database-Files/IG_HKL_J_clean.fasta", "Database-Files/IGHD_clean.fasta")

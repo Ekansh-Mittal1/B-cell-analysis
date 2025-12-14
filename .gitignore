@@ -1,8 +1,12 @@
-# Data files - input and output
+# Data files - input and output (but NOT in geneGUI/data/)
 *.fasta
+!geneGUI/data/**/*.fasta
 *.fa
+!geneGUI/data/**/*.fa
 *.fastq
+!geneGUI/data/**/*.fastq
 *.fq
+!geneGUI/data/**/*.fq
 
 # Tabular data files
 *.csv
@@ -62,50 +66,73 @@ build/
 *~
 .DS_Store
 
-# BLAST database files (generated)
+# BLAST database files (generated) - but NOT in geneGUI/data/
 *.ndb
+!geneGUI/data/**/*.ndb
 *.nhr
+!geneGUI/data/**/*.nhr
 *.nin
+!geneGUI/data/**/*.nin
 *.nog
+!geneGUI/data/**/*.nog
 *.nsd
+!geneGUI/data/**/*.nsd
 *.nsi
+!geneGUI/data/**/*.nsi
 *.nsq
+!geneGUI/data/**/*.nsq
 *.nos
+!geneGUI/data/**/*.nos
 *.not
+!geneGUI/data/**/*.not
 *.ntf
+!geneGUI/data/**/*.ntf
 *.nto
+!geneGUI/data/**/*.nto
 *.phr
+!geneGUI/data/**/*.phr
 *.pin
+!geneGUI/data/**/*.pin
 *.pog
+!geneGUI/data/**/*.pog
 *.psd
+!geneGUI/data/**/*.psd
 *.psi
+!geneGUI/data/**/*.psi
 *.psq
+!geneGUI/data/**/*.psq
 
-# Keep reference database files in data/IMGT_Human_Database/
-!data/IMGT_Human_Database/*.fasta
+# Keep reference database files in geneGUI/data/IMGT_Human_Database/
+!geneGUI/data/IMGT_Human_Database/*.fasta
 
 # Keep Database-Files directory and all its contents
-!data/Database-Files/
-!data/Database-Files/**
+!geneGUI/data/Database-Files/
+!geneGUI/data/Database-Files/**
 
 # Keep reference internal_data files
-!data/internal_data/**/*.imgt
-!data/internal_data/**/*.kabat
-!data/internal_data/**/*.nhr
-!data/internal_data/**/*.nin
-!data/internal_data/**/*.nog
-!data/internal_data/**/*.nsd
-!data/internal_data/**/*.nsi
-!data/internal_data/**/*.nsq
-!data/internal_data/**/*.phr
-!data/internal_data/**/*.pin
-!data/internal_data/**/*.pog
-!data/internal_data/**/*.psd
-!data/internal_data/**/*.psi
-!data/internal_data/**/*.psq
+!geneGUI/data/internal_data/**/*.imgt
+!geneGUI/data/internal_data/**/*.kabat
+!geneGUI/data/internal_data/**/*.nhr
+!geneGUI/data/internal_data/**/*.nin
+!geneGUI/data/internal_data/**/*.nog
+!geneGUI/data/internal_data/**/*.nsd
+!geneGUI/data/internal_data/**/*.nsi
+!geneGUI/data/internal_data/**/*.nsq
+!geneGUI/data/internal_data/**/*.phr
+!geneGUI/data/internal_data/**/*.pin
+!geneGUI/data/internal_data/**/*.pog
+!geneGUI/data/internal_data/**/*.psd
+!geneGUI/data/internal_data/**/*.psi
+!geneGUI/data/internal_data/**/*.psq
 
 # Keep reference optional_data files
-!data/optional_data/**/*.aux
+!geneGUI/data/optional_data/**/*.aux
+
+# Keep all files in geneGUI/data/ (override all ignore patterns)
+!geneGUI/data/
+!geneGUI/data/**
+# But still ignore .DS_Store files
+geneGUI/data/**/.DS_Store
 
 # Keep bin executables
 !bin/**

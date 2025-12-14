@@ -29,7 +29,16 @@ If it says it cannot be opened, give it permisison as described [here](https://s
 
 # Starting the GUI
 
-run the main.py file
+Run the application using:
+```bash
+python3 run.py
+```
+
+Or from the geneGUI directory:
+```bash
+cd geneGUI
+python3 run.py
+```
 
 # Features
 

@@ -182,26 +182,103 @@ class menuWindow(QMainWindow):
                 os.makedirs(clean_fasta_dir)
             # Reinitialize Fasta_Data as a list since it was converted to string in importFasta()
             self.Fasta_Data = []
+            valid_paths = []
             for i, val in enumerate(self.Fasta_Paths):
                 fileName = os.path.basename(val)
-                newPath = os.path.join(clean_fasta_dir, fileName[0:fileName.find(".")] + "_clean" + fileName[fileName.find("."):])
-
-                try:
-                    #cleans the fasta file using clean.py
-                    cl.clean_imgt(val, newPath)
-                    
-                except:
-                    #if the fasta files already exists it throws a warning
+                
+                # First verify the input file exists and is readable
+                if not os.path.exists(val):
                     warning = QMessageBox(self)
-                    warning.setText("Cleaned Fasta file already exists, using that instead.")
+                    warning.setText(f"Input fasta file does not exist: {val}")
                     warning.exec()
+                    continue
+                
+                if os.path.getsize(val) == 0:
+                    warning = QMessageBox(self)
+                    warning.setText(f"Input fasta file is empty: {fileName}")
+                    warning.exec()
+                    continue
+                
+                # Handle case where filename might not have a dot
+                dot_index = fileName.find(".")
+                if dot_index == -1:
+                    newPath = os.path.join(clean_fasta_dir, fileName + "_clean")
+                else:
+                    newPath = os.path.join(clean_fasta_dir, fileName[0:dot_index] + "_clean" + fileName[dot_index:])
 
-                # Update path to point to cleaned file
-                self.Fasta_Paths[i] = newPath
-                with open(newPath, "r") as txt_file:
-                    self.Fasta_Data.append("".join((txt_file.readlines())))
+                # Check if cleaned file already exists and is valid
+                needs_cleaning = True
+                if os.path.exists(newPath):
+                    # Check if existing file is valid (non-empty and has at least one sequence)
+                    try:
+                        if os.path.getsize(newPath) > 0:
+                            # Quick check: see if file has at least one header line
+                            with open(newPath, "r") as test_file:
+                                has_header = any(line.startswith('>') for line in test_file)
+                            if has_header:
+                                needs_cleaning = False
+                    except:
+                        # If we can't read it, we need to recreate it
+                        needs_cleaning = True
+
+                # Clean the file if needed
+                if needs_cleaning:
+                    # Remove existing file if it exists (might be corrupted)
+                    if os.path.exists(newPath):
+                        try:
+                            os.remove(newPath)
+                        except:
+                            pass
+                    try:
+                        #cleans the fasta file using clean.py
+                        cl.clean_imgt(val, newPath)
+                    except FileExistsError:
+                        # File was created between check and creation, try to use it
+                        pass
+                    except Exception as e:
+                        # If cleaning fails, show error with details
+                        warning = QMessageBox(self)
+                        warning.setText(f"Failed to clean fasta file {fileName}:\n{str(e)}\n\nInput file: {val}")
+                        warning.exec()
+                        # Skip this file - don't add to valid paths or Fasta_Data
+                        continue
+
+                # Verify file exists and is readable before reading
+                if os.path.exists(newPath) and os.path.getsize(newPath) > 0:
+                    try:
+                        # Update path to point to cleaned file
+                        valid_paths.append(newPath)
+                        with open(newPath, "r") as txt_file:
+                            content = "".join((txt_file.readlines()))
+                            if content.strip():  # Make sure content is not just whitespace
+                                self.Fasta_Data.append(content)
+                            else:
+                                # File exists but is empty/whitespace only
+                                warning = QMessageBox(self)
+                                warning.setText(f"Cleaned fasta file {fileName} contains no valid sequences.")
+                                warning.exec()
+                                valid_paths.pop()  # Remove from valid_paths
+                    except Exception as e:
+                        # Error reading file
+                        warning = QMessageBox(self)
+                        warning.setText(f"Error reading cleaned fasta file {fileName}:\n{str(e)}")
+                        warning.exec()
+                else:
+                    # File doesn't exist or is empty
+                    warning = QMessageBox(self)
+                    warning.setText(f"Cleaned fasta file {fileName} is empty or doesn't exist.\nExpected path: {newPath}")
+                    warning.exec()
+            # Update Fasta_Paths to only include valid cleaned files
+            self.Fasta_Paths = valid_paths
             # Convert Fasta_Data back to string after cleaning
-            self.Fasta_Data = "\n".join(self.Fasta_Data)
+            if self.Fasta_Data:
+                self.Fasta_Data = "\n".join(self.Fasta_Data)
+            else:
+                # No valid cleaned files, show error with more details
+                error = QMessageBox(self)
+                error.setText(f"No valid cleaned fasta files were created.\n\nChecked {len(self.Fasta_Paths)} input files.\nPlease check your input files and try again.")
+                error.exec()
+                return
         
         #cleans the database files and stores the cleaned files in a folder
         #first removes all items from any previous runs
@@ -280,11 +357,16 @@ class Sequence():
         return False
 
 class mainWindow(QMainWindow):
+    # Signal to request threshold dialog (emitted from worker thread, handled on main thread)
+    request_threshold = pyqtSignal(float, object)  # calculated_dist, result_container
+    
     def __init__(self, menu_window=None):
         super().__init__()
         #loads the dark theme
         self.setStyleSheet(qdarkstyle.load_stylesheet())
         self.menuW = menu_window  # Store reference to menuWindow
+        # Connect signal to slot that will run on main thread
+        self.request_threshold.connect(self._show_threshold_dialog, Qt.ConnectionType.QueuedConnection)
         self.initUI()
 
     #sorting criteria key
@@ -476,10 +558,19 @@ class mainWindow(QMainWindow):
         self.nameBox.setCursorPosition(0)
 
 
-    def getCustomThreshold(self):
+    def _show_threshold_dialog(self, calculated_dist, result_container):
+        """Show threshold dialog on main thread (called via signal)"""
+        threshold = self.getCustomThreshold(calculated_dist)
+        result_container['value'] = threshold
+    
+    def getCustomThreshold(self, default_dist=None):
+        # Use provided default or get from clone module
+        if default_dist is None:
+            default_dist = clone.get_dist()
+        
         flag = True
         while flag:
-            num,ok = QInputDialog.getText(self,"Custom clustering threshold","enter a custom clustering threshold, or cancel to use default \n Default is: " + str(clone.get_dist()))
+            num,ok = QInputDialog.getText(self,"Custom clustering threshold","enter a custom clustering threshold, or cancel to use calculated value \n Calculated threshold is: " + str(default_dist))
             try:
                 if(not ok):
                     flag = False
@@ -493,7 +584,7 @@ class mainWindow(QMainWindow):
         if ok:
             return str(num)
         else:
-            return str(clone.get_dist())
+            return str(default_dist)
         
     #loads proper UI
     def initUI(self):
@@ -591,7 +682,9 @@ class mainWindow(QMainWindow):
 
         self.progW = progressWindow()
         self.progW.show()
-        self.customThresh = self.getCustomThreshold()
+        # Don't get custom threshold yet - wait until after distance is calculated
+        # Store that user wants to use custom threshold, but get the value later
+        self.use_custom_threshold = False  # Will be set if user provides custom value
 
         #runs a command that records all terminal output and saves it to output.txt
         # a = subprocess.Popen(["script", "-q", "output.txt"], stdout=subprocess.PIPE)
@@ -634,10 +727,51 @@ class mainWindow(QMainWindow):
 
         self.update_value(25, "Formatting Database:")
 
-        clone.generate_db_dist(self.menuW.Database_Path_J, self.menuW.Database_Path_V, self.menuW.Database_Path_D, self.menuW.combined_fasta)
+        try:
+            clone.generate_db_dist(self.menuW.Database_Path_J, self.menuW.Database_Path_V, self.menuW.Database_Path_D, self.menuW.combined_fasta)
+            # Get the calculated distance
+            calculated_dist = clone.get_dist()
+            print(f"Using calculated distance threshold: {calculated_dist}")
+        except Exception as e:
+            print(f"Warning: Error in generate_db_dist: {str(e)}")
+            # Continue with default distance if calculation fails
+            if hasattr(clone, 'DIST'):
+                clone.DIST = 0.1
+            calculated_dist = 0.1
+        
+        # Request threshold dialog on main thread using signal/slot
+        result_container = {'value': None}
+        self.request_threshold.emit(calculated_dist, result_container)
+        
+        # Wait for dialog to complete (process events to allow signal to be handled)
+        from PyQt6.QtCore import QEventLoop, QTimer
+        loop = QEventLoop()
+        # Use a timer to periodically check if result is ready
+        def check_result():
+            if result_container['value'] is not None:
+                loop.quit()
+            else:
+                QTimer.singleShot(100, check_result)
+        
+        QTimer.singleShot(100, check_result)
+        loop.exec()
+        
+        # Get the result
+        if result_container['value'] is not None:
+            self.customThresh = result_container['value']
+        else:
+            # Fallback to calculated value if something went wrong
+            self.customThresh = str(calculated_dist)
+        
+        print(f"Using distance threshold: {self.customThresh}")
+        
         self.update_value(40, "Finding Clones: ")
 
-        clone.finish_clonality(self.menuW.Database_Path_J, self.menuW.Database_Path_V, self.menuW.Database_Path_D, self.menuW.combined_fasta, self.customThresh)
+        try:
+            clone.finish_clonality(self.menuW.Database_Path_J, self.menuW.Database_Path_V, self.menuW.Database_Path_D, self.menuW.combined_fasta, self.customThresh)
+        except Exception as e:
+            print(f"Warning: Error in finish_clonality: {str(e)}")
+            # Try to continue even if clonality fails
         self.update_value(50, "Building Tree: ")
 
         #read clone data
@@ -669,7 +803,21 @@ class mainWindow(QMainWindow):
             os.chdir(original_cwd)
         # Update visualize-tree.R to use outs directory
         visualize_tree_script = os.path.join(geneHome, 'src', 'scripts', 'visualize-tree.R')
-        os.system(f"Rscript {visualize_tree_script} {outs_dir}")
+        try:
+            result = subprocess.run(
+                [f"Rscript", visualize_tree_script, outs_dir],
+                capture_output=True,
+                text=True,
+                timeout=300
+            )
+            if result.returncode != 0:
+                print(f"Warning: visualize-tree.R returned non-zero exit code: {result.returncode}")
+                if result.stderr:
+                    print(f"R script stderr: {result.stderr}")
+        except subprocess.TimeoutExpired:
+            print("Warning: visualize-tree.R timed out after 5 minutes")
+        except Exception as e:
+            print(f"Warning: Error running visualize-tree.R: {str(e)}")
         self.update_value(100, "Done!")
 
         self.show_trees()

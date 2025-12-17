@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { currentView, analysisState, resultsState, processSequenceResults, addLog, setProgress } from './lib/stores/app';
+  import { currentView, analysisState, resultsState, processSequenceResults, processDlSequenceResults, addLog, setProgress } from './lib/stores/app';
   import Wizard from './routes/wizard/Wizard.svelte';
   import Results from './routes/results/Results.svelte';
   import ThresholdDialog from './lib/components/ThresholdDialog.svelte';
@@ -38,6 +38,9 @@
           console.log('[App] Received result event:', data);
           if (data.artifact === 'sequences' && data.data) {
             processSequenceResults(data.data);
+          }
+          if (data.artifact === 'dl_sequences' && data.data) {
+            processDlSequenceResults(data.data);
           }
           if (data.artifact === 'tree_images' && data.data?.images) {
             resultsState.update(s => ({

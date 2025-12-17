@@ -1,10 +1,11 @@
 <script lang="ts">
-  import { resultsState, selectedSequence } from '../../lib/stores/app';
+  import { resultsState, selectedSequence, selectedDlSequence } from '../../lib/stores/app';
   import SequenceBrowser from './SequenceBrowser.svelte';
   import SequenceDetails from './SequenceDetails.svelte';
+  import DlSequenceBrowser from './DlSequenceBrowser.svelte';
   import PhylogeneticTrees from './PhylogeneticTrees.svelte';
   
-  type Tab = 'browser' | 'trees';
+  type Tab = 'browser' | 'dl-browser' | 'trees';
   let activeTab: Tab = 'browser';
 </script>
 
@@ -32,6 +33,21 @@
         </svg>
         Sequence Browser
       </button>
+      {#if $resultsState.dlSequences.length > 0}
+        <button 
+          class="tab" 
+          class:active={activeTab === 'dl-browser'}
+          on:click={() => activeTab = 'dl-browser'}
+        >
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+            <circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.5" fill="none"/>
+            <circle cx="8" cy="8" r="2" fill="currentColor"/>
+            <path d="M8 2v4M8 10v4M2 8h4M10 8h4" stroke="currentColor" stroke-width="1.5"/>
+          </svg>
+          DL Clustering
+          <span class="tab-badge">{$resultsState.dlSequences.length}</span>
+        </button>
+      {/if}
       <button 
         class="tab" 
         class:active={activeTab === 'trees'}
@@ -69,6 +85,31 @@
               <h3 class="empty-title">No Sequence Selected</h3>
               <p class="empty-description">
                 Select a sequence from the browser to view detailed information
+              </p>
+            </div>
+          {/if}
+        </main>
+      </div>
+    {:else if activeTab === 'dl-browser'}
+      <div class="browser-layout">
+        <aside class="browser-sidebar">
+          <DlSequenceBrowser />
+        </aside>
+        <main class="details-panel">
+          {#if $selectedDlSequence}
+            <SequenceDetails sequence={$selectedDlSequence} />
+          {:else}
+            <div class="empty-state">
+              <div class="empty-icon">
+                <svg width="48" height="48" viewBox="0 0 48 48" fill="none">
+                  <circle cx="24" cy="24" r="18" stroke="currentColor" stroke-width="2" fill="none"/>
+                  <circle cx="24" cy="24" r="6" fill="currentColor"/>
+                  <path d="M24 6v12M24 30v12M6 24h12M30 24h12" stroke="currentColor" stroke-width="2"/>
+                </svg>
+              </div>
+              <h3 class="empty-title">No Sequence Selected</h3>
+              <p class="empty-description">
+                Select a sequence from the DL clustering browser to view detailed information
               </p>
             </div>
           {/if}

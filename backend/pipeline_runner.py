@@ -36,6 +36,14 @@ from utils import blast
 from utils import clonality as clone
 from utils.clonalityFunctions import make_db, define_clonality, create_germline, findDist
 
+# Try to import DL clustering (optional)
+try:
+    from utils import dl_clustering
+    DL_CLUSTERING_AVAILABLE = True
+except ImportError:
+    DL_CLUSTERING_AVAILABLE = False
+    print("Warning: DL clustering not available")
+
 
 class NDJSONEmitter:
     """Utility class for emitting NDJSON messages to stdout."""
@@ -444,24 +452,103 @@ class PipelineRunner:
             tempdf = clonedf.copy()
             tempdf.drop_duplicates(subset="clone_id", keep='first', inplace=True)
             tempdf = tempdf.head(20)
+            top_clones = tempdf['clone_id'].tolist()
             if 'clone_freq' in tempdf.columns:
                 tempdf = tempdf.drop(columns=['clone_freq'])
             
             build_trees_input_path = os.path.join(self.output_dir, 'build-trees-input.tsv')
             tempdf.to_csv(build_trees_input_path, sep="\t", index=False)
             
-            # Run BuildTrees
+            # Create sequence count mapping BEFORE BuildTrees collapses sequences
+            # Count how many times each unique sequence appears in each clone
+            # BuildTrees collapses identical sequences, so we need to count by sequence content
+            from Bio import SeqIO
+            sequence_counts = {}
+            combined_fasta = os.path.join(self.output_dir, 'combined.fasta')
+            
+            if os.path.exists(combined_fasta):
+                # Create a mapping of sequence_id -> sequence content
+                seq_content_map = {}
+                for record in SeqIO.parse(combined_fasta, "fasta"):
+                    # Normalize sequence: uppercase and remove gaps
+                    seq_content = str(record.seq).upper().replace('-', '').replace('N', '')
+                    seq_content_map[str(record.id)] = seq_content
+                
+                # Count sequences by their actual DNA content (not just ID) per clone
+                for clone_id in top_clones:
+                    clone_seqs = clonedf[clonedf['clone_id'] == clone_id]
+                    # Group by sequence content to count duplicates within this clone
+                    content_to_ids = {}
+                    for _, row in clone_seqs.iterrows():
+                        seq_id = str(row['sequence_id'])
+                        if seq_id in seq_content_map:
+                            seq_content = seq_content_map[seq_id]
+                            if seq_content not in content_to_ids:
+                                content_to_ids[seq_content] = []
+                            content_to_ids[seq_content].append(seq_id)
+                    
+                    # For each unique sequence content in this clone, store the count
+                    # All sequence IDs with the same content get the same count
+                    for seq_content, seq_ids in content_to_ids.items():
+                        count = len(seq_ids)  # How many sequences have this content
+                        # Store count for all sequence IDs with this content
+                        for seq_id in seq_ids:
+                            # Use the original sequence_id (with ||| if present) as key
+                            sequence_counts[seq_id] = count
+            else:
+                # Fallback: count by sequence_id (won't catch duplicates with different IDs)
+                for clone_id in top_clones:
+                    clone_seqs = clonedf[clonedf['clone_id'] == clone_id]
+                    for seq_id in clone_seqs['sequence_id']:
+                        seq_id_str = str(seq_id)
+                        if seq_id_str not in sequence_counts:
+                            sequence_counts[seq_id_str] = 0
+                        sequence_counts[seq_id_str] += 1
+            
+            # Save sequence counts to a JSON file for R script to read
+            import json
+            sequence_counts_path = os.path.join(self.output_dir, 'sequence_counts.json')
+            with open(sequence_counts_path, 'w') as f:
+                json.dump(sequence_counts, f)
+            
+            # Run BuildTrees (without IgPhyML)
             build_trees_dir = os.path.join(self.output_dir, 'build-trees-input')
             os.system(f"rm -rf {build_trees_dir}")
             
             original_cwd = os.getcwd()
             try:
                 os.chdir(self.output_dir)
-                os.system(f"BuildTrees.py -d build-trees-input.tsv --collapse --igphyml --clean all --optimize n 2>/dev/null || true")
+                # Build trees with BuildTrees but skip IgPhyML (we'll build trees ourselves)
+                os.system(f"BuildTrees.py -d build-trees-input.tsv --collapse --clean all 2>/dev/null || true")
             finally:
                 os.chdir(original_cwd)
             
-            self.emit.log("info", "Tree building complete")
+            # Build trees using R's ape package (works with any number of sequences >= 3)
+            # This is simpler and more reliable than RAxML for small clones
+            import subprocess
+            
+            trees_dir = os.path.join(self.output_dir, 'trees')
+            os.makedirs(trees_dir, exist_ok=True)
+            
+            # Create an R script to build trees
+            build_trees_r = os.path.join(backend_dir, 'scripts', 'build-trees-ape.R')
+            
+            result = subprocess.run(
+                ['Rscript', build_trees_r, self.output_dir],
+                capture_output=True,
+                text=True,
+                timeout=300
+            )
+            
+            if result.returncode != 0:
+                self.emit.log("warn", f"Tree building failed: {result.stderr[:300] if result.stderr else 'no error'}")
+                return True  # Non-fatal
+            
+            # Count generated trees
+            import glob
+            tree_files = glob.glob(os.path.join(trees_dir, '*.newick'))
+            
+            self.emit.log("info", f"Built {len(tree_files)} phylogenetic trees")
             return True
             
         except Exception as e:
@@ -665,6 +752,143 @@ class PipelineRunner:
             traceback.print_exc()
             return False
     
+    def run_dl_clustering(self) -> bool:
+        """Run deep learning-based clustering on CDR3 sequences."""
+        if not DL_CLUSTERING_AVAILABLE:
+            self.emit.log("info", "Deep learning clustering not available, skipping")
+            return False
+        
+        self.emit.progress("dl_clustering", 98, "Running deep learning clustering...")
+        
+        try:
+            import pandas as pd
+            from Bio import SeqIO
+            
+            # Use HuggingFace pre-trained DNABERT-2 model
+            # The local finetuned model is incomplete (only .part file)
+            model_name = "zhihan1996/DNABERT-2-117M"
+            
+            self.emit.log("info", f"Using DNABERT-2 model: {model_name}")
+            self.emit.log("info", "Note: First run will download the model (~500MB)")
+            
+            # Get sequences from combined.fasta
+            if not os.path.exists(self.combined_fasta):
+                self.emit.log("warn", "Combined FASTA not found, skipping DL clustering")
+                return False
+            
+            # Read sequence IDs and CDR3 sequences from clonality output
+            clone_pass_path = os.path.join(self.output_dir, 'ig_out_data_db-pass_clone-pass_germ-pass.tsv')
+            if not os.path.exists(clone_pass_path):
+                self.emit.log("warn", "Clonality output not found, skipping DL clustering")
+                return False
+            
+            # Load clonality data
+            clonality_df = pd.read_table(clone_pass_path)
+            
+            # Extract sequences with CDR3 data
+            sequences_with_ids = []
+            for _, row in clonality_df.iterrows():
+                if pd.notna(row.get('junction')) and row.get('junction'):
+                    seq_id = str(row['sequence_id'])
+                    cdr3_seq = str(row['junction'])
+                    sequences_with_ids.append((seq_id, cdr3_seq))
+            
+            if not sequences_with_ids:
+                self.emit.log("warn", "No CDR3 sequences found for DL clustering")
+                return False
+            
+            self.emit.log("info", f"Running DL clustering on {len(sequences_with_ids)} sequences...")
+            
+            # Run DL clustering
+            cluster_mapping = dl_clustering.run_dl_clustering(
+                sequences_with_ids,
+                model_dir=model_name,  # HuggingFace model name
+                threshold=0.00015,  # Default threshold from demo
+                distance_type='cosine'
+            )
+            
+            if not cluster_mapping:
+                self.emit.log("warn", "DL clustering returned no results")
+                return False
+            
+            # Get clone counts
+            clone_counts = dl_clustering.get_clone_counts(cluster_mapping)
+            
+            # Create DL clustering results (same format as traditional results, but with DL clone IDs)
+            dl_sequences = []
+            for seq_id, dl_clone_id in cluster_mapping.items():
+                # Find the original sequence data
+                original_seq = None
+                for record in SeqIO.parse(self.combined_fasta, "fasta"):
+                    if record.id == seq_id:
+                        original_seq = record
+                        break
+                
+                if not original_seq:
+                    continue
+                
+                # Get data from clonality file
+                seq_clonality_data = clonality_df[clonality_df['sequence_id'] == seq_id]
+                
+                seq_record = {
+                    'id': seq_id,
+                    'name': seq_id,
+                    'v_gene': None, 'd_gene': None, 'j_gene': None,
+                    'v_locus': None, 'd_locus': None, 'j_locus': None,
+                    'cdr3_dna': None, 'cdr3_peptide': None, 'somatic_mutations': None,
+                    'isotype': None,
+                    'clone_id': dl_clone_id,
+                    'clone_count': clone_counts.get(seq_id, 0),
+                    'productive': True
+                }
+                
+                # Copy CDR3 and other data from clonality output
+                if not seq_clonality_data.empty:
+                    row = seq_clonality_data.iloc[0]
+                    seq_record['cdr3_dna'] = str(row['junction']) if pd.notna(row['junction']) else None
+                    seq_record['cdr3_peptide'] = str(row['junction_aa']) if pd.notna(row['junction_aa']) else None
+                    seq_record['v_gene'] = str(row['v_call']) if pd.notna(row.get('v_call')) else None
+                    seq_record['d_gene'] = str(row['d_call']) if pd.notna(row.get('d_call')) else None
+                    seq_record['j_gene'] = str(row['j_call']) if pd.notna(row.get('j_call')) else None
+                
+                dl_sequences.append(seq_record)
+            
+            # Group DL sequences by file (same logic as traditional clustering)
+            file_groups = {}
+            for seq in dl_sequences:
+                seq_id = seq['id']
+                
+                # Split by the ||| delimiter
+                if '|||' in seq_id:
+                    parts = seq_id.split('|||')
+                    filename = parts[-1] if len(parts) > 1 else 'unknown.fasta'
+                else:
+                    # Fallback for old format
+                    parts = seq_id.rsplit('_', 1)
+                    if len(parts) > 1 and (parts[1].endswith('.fasta') or parts[1].endswith('.fa')):
+                        filename = parts[1]
+                    else:
+                        filename = 'unknown.fasta'
+                
+                if filename not in file_groups:
+                    file_groups[filename] = []
+                file_groups[filename].append(seq)
+            
+            # Emit DL clustering results
+            self.emit.result("dl_sequences", data={
+                "sequences": dl_sequences,
+                "file_groups": file_groups,
+                "total_count": len(dl_sequences)
+            })
+            
+            self.emit.log("info", f"DL clustering complete: {len(dl_sequences)} sequences, {len(file_groups)} file groups")
+            return True
+            
+        except Exception as e:
+            self.emit.log("warn", f"DL clustering failed: {str(e)}")
+            self.emit.log("debug", traceback.format_exc())
+            return False
+    
     def run(self) -> bool:
         """Execute the full analysis pipeline."""
         try:
@@ -731,6 +955,9 @@ class PipelineRunner:
             if not self.load_results():
                 self.emit.complete(False, "Failed to load results")
                 return False
+            
+            # Step 12: Run deep learning clustering (DISABLED - uncomment to enable)
+            # self.run_dl_clustering()
             
             self.emit.progress("complete", 100, "Analysis complete!")
             self.emit.complete(True)

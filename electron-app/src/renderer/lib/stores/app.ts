@@ -65,7 +65,10 @@ export interface FileGroup {
 export interface ResultsState {
   sequences: SequenceData[];
   fileGroups: FileGroup[];
+  dlSequences: SequenceData[];
+  dlFileGroups: FileGroup[];
   selectedSequenceId: string | null;
+  selectedDlSequenceId: string | null;
   treeImages: string[];
   outputDir: string | null;
 }
@@ -112,7 +115,10 @@ export const analysisState: Writable<AnalysisState> = writable({
 export const resultsState: Writable<ResultsState> = writable({
   sequences: [],
   fileGroups: [],
+  dlSequences: [],
+  dlFileGroups: [],
   selectedSequenceId: null,
+  selectedDlSequenceId: null,
   treeImages: [],
   outputDir: null
 });
@@ -149,42 +155,83 @@ export const selectedSequence: Readable<SequenceData | null> = derived(
   }
 );
 
+// Selected DL sequence
+export const selectedDlSequence: Readable<SequenceData | null> = derived(
+  resultsState,
+  ($state) => {
+    if (!$state.selectedDlSequenceId) return null;
+    return $state.dlSequences.find(s => s.id === $state.selectedDlSequenceId) || null;
+  }
+);
+
 // Search filter for sequences
 export const sequenceSearchQuery: Writable<string> = writable('');
+
+// Helper function to sort sequences by clone size (largest first)
+const sortSequencesByClone = (sequences: SequenceData[]): SequenceData[] => {
+  return [...sequences].sort((a, b) => {
+    // Sequences with clones come first
+    const aHasClone = a.clone_id !== undefined && a.clone_id !== null && (a.clone_count ?? 0) > 0;
+    const bHasClone = b.clone_id !== undefined && b.clone_id !== null && (b.clone_count ?? 0) > 0;
+    
+    // If one has a clone and the other doesn't, clone comes first
+    if (aHasClone && !bHasClone) return -1;
+    if (!aHasClone && bHasClone) return 1;
+    
+    // If both have clones, sort by clone_count (descending)
+    if (aHasClone && bHasClone) {
+      const aCount = a.clone_count ?? 0;
+      const bCount = b.clone_count ?? 0;
+      if (bCount !== aCount) {
+        return bCount - aCount; // Descending order
+      }
+      // If same clone count, sort by clone_id for consistency
+      return (a.clone_id ?? 0) - (b.clone_id ?? 0);
+    }
+    
+    // If neither has a clone, maintain original order
+    return 0;
+  });
+};
 
 export const filteredFileGroups: Readable<FileGroup[]> = derived(
   [resultsState, sequenceSearchQuery],
   ([$results, $query]) => {
     const lowerQuery = $query.trim().toLowerCase();
     
-    // Helper function to sort sequences by clone size (largest first)
-    const sortSequencesByClone = (sequences: SequenceData[]): SequenceData[] => {
-      return [...sequences].sort((a, b) => {
-        // Sequences with clones come first
-        const aHasClone = a.clone_id !== undefined && a.clone_id !== null && (a.clone_count ?? 0) > 0;
-        const bHasClone = b.clone_id !== undefined && b.clone_id !== null && (b.clone_count ?? 0) > 0;
-        
-        // If one has a clone and the other doesn't, clone comes first
-        if (aHasClone && !bHasClone) return -1;
-        if (!aHasClone && bHasClone) return 1;
-        
-        // If both have clones, sort by clone_count (descending)
-        if (aHasClone && bHasClone) {
-          const aCount = a.clone_count ?? 0;
-          const bCount = b.clone_count ?? 0;
-          if (bCount !== aCount) {
-            return bCount - aCount; // Descending order
-          }
-          // If same clone count, sort by clone_id for consistency
-          return (a.clone_id ?? 0) - (b.clone_id ?? 0);
-        }
-        
-        // If neither has a clone, maintain original order
-        return 0;
-      });
-    };
-    
     let groups = $results.fileGroups;
+    
+    // Apply search filter if query exists
+    if (lowerQuery) {
+      groups = groups
+        .map(group => ({
+          ...group,
+          sequences: group.sequences.filter(seq =>
+            seq.name.toLowerCase().includes(lowerQuery) ||
+            seq.v_gene?.toLowerCase().includes(lowerQuery) ||
+            seq.d_gene?.toLowerCase().includes(lowerQuery) ||
+            seq.j_gene?.toLowerCase().includes(lowerQuery) ||
+            seq.cdr3_peptide?.toLowerCase().includes(lowerQuery)
+          )
+        }))
+        .filter(group => group.sequences.length > 0);
+    }
+    
+    // Sort sequences within each group by clone size
+    return groups.map(group => ({
+      ...group,
+      sequences: sortSequencesByClone(group.sequences)
+    }));
+  }
+);
+
+// Filtered DL file groups (same logic as traditional clustering)
+export const filteredDlFileGroups: Readable<FileGroup[]> = derived(
+  [resultsState, sequenceSearchQuery],
+  ([$results, $query]) => {
+    const lowerQuery = $query.trim().toLowerCase();
+    
+    let groups = $results.dlFileGroups;
     
     // Apply search filter if query exists
     if (lowerQuery) {
@@ -267,6 +314,20 @@ export function processSequenceResults(data: { sequences: SequenceData[]; file_g
   }));
 }
 
+export function processDlSequenceResults(data: { sequences: SequenceData[]; file_groups: Record<string, SequenceData[]> }): void {
+  const fileGroups: FileGroup[] = Object.entries(data.file_groups).map(([filename, sequences]) => ({
+    filename,
+    sequences,
+    expanded: true
+  }));
+  
+  resultsState.update(state => ({
+    ...state,
+    dlSequences: data.sequences,
+    dlFileGroups: fileGroups
+  }));
+}
+
 export function toggleFileGroup(filename: string): void {
   resultsState.update(state => ({
     ...state,
@@ -282,6 +343,24 @@ export function selectSequence(id: string): void {
   resultsState.update(state => ({
     ...state,
     selectedSequenceId: id
+  }));
+}
+
+export function selectDlSequence(id: string): void {
+  resultsState.update(state => ({
+    ...state,
+    selectedDlSequenceId: id
+  }));
+}
+
+export function toggleDlFileGroup(filename: string): void {
+  resultsState.update(state => ({
+    ...state,
+    dlFileGroups: state.dlFileGroups.map(group =>
+      group.filename === filename
+        ? { ...group, expanded: !group.expanded }
+        : group
+    )
   }));
 }
 

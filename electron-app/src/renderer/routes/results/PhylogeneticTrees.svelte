@@ -74,7 +74,16 @@
         {:else if treeImageData[selectedTreeIndex]}
           <div class="tree-image-container">
             <div class="tree-header">
-              <h2 class="tree-title">{getTreeName($resultsState.treeImages[selectedTreeIndex])}</h2>
+              <div class="tree-header-main">
+                <h2 class="tree-title">{getTreeName($resultsState.treeImages[selectedTreeIndex])}</h2>
+                <div class="tree-info-note">
+                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                    <circle cx="8" cy="8" r="7" stroke="currentColor" stroke-width="1.5"/>
+                    <path d="M8 6v4M8 4v0" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                  </svg>
+                  <span>Trees show unique sequences only. Sequence counts are displayed on tip labels (e.g., "×5" indicates 5 identical sequences).</span>
+                </div>
+              </div>
               <div class="tree-actions">
                 <button class="btn btn-secondary btn-sm">
                   <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
@@ -265,11 +274,19 @@
   .tree-header {
     display: flex;
     justify-content: space-between;
-    align-items: center;
+    align-items: flex-start;
     padding: var(--space-4) var(--space-6);
     background: var(--surface-raised);
     border-bottom: 1px solid var(--border-light);
     flex-shrink: 0;
+    gap: var(--space-4);
+  }
+  
+  .tree-header-main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
   }
   
   .tree-title {
@@ -277,6 +294,28 @@
     font-weight: var(--font-semibold);
     color: var(--text-primary);
     margin: 0;
+  }
+  
+  .tree-info-note {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-primary-light);
+    border-radius: var(--border-radius-md);
+    font-size: var(--text-xs);
+    color: var(--color-primary);
+    line-height: 1.4;
+  }
+  
+  .tree-info-note svg {
+    flex-shrink: 0;
+    margin-top: 2px;
+    opacity: 0.8;
+  }
+  
+  .tree-info-note span {
+    flex: 1;
   }
   
   .tree-actions {

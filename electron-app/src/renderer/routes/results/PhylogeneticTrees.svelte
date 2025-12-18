@@ -5,6 +5,7 @@
   let selectedTreeIndex = 0;
   let treeImageData: string[] = [];
   let isLoading = true;
+  let isExporting = false;
   
   onMount(async () => {
     if (window.electronAPI && $resultsState.treeImages.length > 0) {
@@ -23,6 +24,54 @@
   function getTreeName(path: string): string {
     const filename = path.split('/').pop() || '';
     return filename.replace('.png', '').replace(/_/g, ' ');
+  }
+  
+  async function exportTreeImage() {
+    if (!window.electronAPI) {
+      alert('Electron API not available');
+      return;
+    }
+    
+    if (selectedTreeIndex < 0 || selectedTreeIndex >= $resultsState.treeImages.length) {
+      alert('No tree selected');
+      return;
+    }
+    
+    const sourcePath = $resultsState.treeImages[selectedTreeIndex];
+    const treeName = getTreeName(sourcePath);
+    
+    isExporting = true;
+    
+    try {
+      // Open save dialog
+      const destPath = await window.electronAPI.saveFile({
+        defaultPath: `${treeName}.png`,
+        filters: [
+          { name: 'PNG Images', extensions: ['png'] },
+          { name: 'All Files', extensions: ['*'] }
+        ]
+      });
+      
+      if (!destPath) {
+        // User cancelled
+        isExporting = false;
+        return;
+      }
+      
+      // Copy the image file to the selected location
+      const result = await window.electronAPI.copyFile(sourcePath, destPath);
+      
+      if (result.success) {
+        alert(`Tree image exported successfully to ${destPath}`);
+      } else {
+        alert(`Failed to export tree image: ${result.error || 'Unknown error'}`);
+      }
+    } catch (error: any) {
+      console.error('Export error:', error);
+      alert(`Export failed: ${error.message || 'Unknown error'}`);
+    } finally {
+      isExporting = false;
+    }
   }
 </script>
 
@@ -85,11 +134,16 @@
                 </div>
               </div>
               <div class="tree-actions">
-                <button class="btn btn-secondary btn-sm">
+                <button 
+                  class="btn btn-secondary btn-sm"
+                  on:click={exportTreeImage}
+                  disabled={isExporting || isLoading}
+                  title="Export tree image to PNG file"
+                >
                   <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
                     <path d="M7 1v8M4 6l3 3 3-3M2 11h10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
                   </svg>
-                  Export
+                  {isExporting ? 'Exporting...' : 'Export'}
                 </button>
               </div>
             </div>
@@ -321,6 +375,11 @@
   .tree-actions {
     display: flex;
     gap: var(--space-2);
+  }
+  
+  .tree-actions button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
   
   .tree-image-wrapper {

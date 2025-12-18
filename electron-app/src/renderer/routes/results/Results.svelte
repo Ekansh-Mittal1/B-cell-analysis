@@ -7,6 +7,133 @@
   
   type Tab = 'browser' | 'dl-browser' | 'trees';
   let activeTab: Tab = 'browser';
+  let isExporting = false;
+
+  // Function to escape CSV values
+  function escapeCsvValue(value: any): string {
+    if (value === null || value === undefined) {
+      return '';
+    }
+    const str = String(value);
+    // If value contains comma, quote, or newline, wrap in quotes and escape quotes
+    if (str.includes(',') || str.includes('"') || str.includes('\n')) {
+      return `"${str.replace(/"/g, '""')}"`;
+    }
+    return str;
+  }
+
+  // Function to convert sequences to CSV
+  function sequencesToCsv(sequences: typeof $resultsState.sequences): string {
+    // Define CSV headers
+    const headers = [
+      'Sequence ID',
+      'Sequence Name',
+      'File',
+      'V Gene',
+      'D Gene',
+      'J Gene',
+      'V Locus',
+      'D Locus',
+      'J Locus',
+      'CDR3 DNA',
+      'CDR3 Peptide',
+      'CDR3 Length (bp)',
+      'Somatic Mutations',
+      'Isotype',
+      'Clone ID',
+      'Clone Count',
+      'Productive'
+    ];
+
+    // Create CSV rows
+    const rows = sequences.map(seq => {
+      // Extract file name from sequence ID if file field is not available
+      let fileName = seq.file || '';
+      if (!fileName && seq.id.includes('|||')) {
+        const parts = seq.id.split('|||');
+        if (parts.length > 1) {
+          fileName = parts[1];
+        }
+      }
+      
+      return [
+        escapeCsvValue(seq.id),
+        escapeCsvValue(seq.name),
+        escapeCsvValue(fileName),
+        escapeCsvValue(seq.v_gene),
+        escapeCsvValue(seq.d_gene),
+        escapeCsvValue(seq.j_gene),
+        escapeCsvValue(seq.v_locus),
+        escapeCsvValue(seq.d_locus),
+        escapeCsvValue(seq.j_locus),
+        escapeCsvValue(seq.cdr3_dna),
+        escapeCsvValue(seq.cdr3_peptide),
+        escapeCsvValue(seq.cdr3_dna ? seq.cdr3_dna.length : ''),
+        escapeCsvValue(seq.somatic_mutations),
+        escapeCsvValue(seq.isotype),
+        escapeCsvValue(seq.clone_id),
+        escapeCsvValue(seq.clone_count),
+        escapeCsvValue(seq.productive ? 'Yes' : 'No')
+      ];
+    });
+
+    // Combine headers and rows
+    const csvLines = [
+      headers.join(','),
+      ...rows.map(row => row.join(','))
+    ];
+
+    return csvLines.join('\n');
+  }
+
+  // Export all sequences to CSV
+  async function exportToCsv() {
+    if (!window.electronAPI) {
+      alert('Electron API not available');
+      return;
+    }
+
+    if ($resultsState.sequences.length === 0) {
+      alert('No sequences to export');
+      return;
+    }
+
+    isExporting = true;
+
+    try {
+      // Open save dialog
+      const filePath = await window.electronAPI.saveFile({
+        defaultPath: 'bcr_analysis_results.csv',
+        filters: [
+          { name: 'CSV Files', extensions: ['csv'] },
+          { name: 'All Files', extensions: ['*'] }
+        ]
+      });
+
+      if (!filePath) {
+        // User cancelled
+        isExporting = false;
+        return;
+      }
+
+      // Convert sequences to CSV
+      const csvContent = sequencesToCsv($resultsState.sequences);
+
+      // Write file
+      const result = await window.electronAPI.writeFile(filePath, csvContent);
+
+      if (result.success) {
+        alert(`Successfully exported ${$resultsState.sequences.length} sequences to ${filePath}`);
+      } else {
+        alert(`Failed to export: ${result.error || 'Unknown error'}`);
+      }
+    } catch (error: any) {
+      console.error('Export error:', error);
+      alert(`Export failed: ${error.message || 'Unknown error'}`);
+    } finally {
+      isExporting = false;
+    }
+  }
 </script>
 
 <div class="results-container">
@@ -19,7 +146,20 @@
       </span>
     </div>
     
-    <div class="tabs">
+    <div class="header-actions">
+      <button 
+        class="btn btn-primary export-btn"
+        on:click={exportToCsv}
+        disabled={isExporting || $resultsState.sequences.length === 0}
+        title="Export all sequences to CSV"
+      >
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+          <path d="M8 2v8M5 7l3 3 3-3M2 12h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        {isExporting ? 'Exporting...' : 'Export to CSV'}
+      </button>
+      
+      <div class="tabs">
       <button 
         class="tab" 
         class:active={activeTab === 'browser'}
@@ -61,6 +201,7 @@
           <span class="tab-badge">{$resultsState.treeImages.length}</span>
         {/if}
       </button>
+      </div>
     </div>
   </div>
   
@@ -140,12 +281,39 @@
     background: var(--surface-raised);
     border-bottom: 1px solid var(--border-light);
     flex-shrink: 0;
+    gap: var(--space-4);
   }
   
   .header-info {
     display: flex;
     align-items: baseline;
     gap: var(--space-3);
+    flex: 1;
+  }
+  
+  .header-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+  }
+  
+  .export-btn {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-4);
+    font-size: var(--text-sm);
+    font-weight: var(--font-medium);
+    white-space: nowrap;
+  }
+  
+  .export-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  
+  .export-btn svg {
+    flex-shrink: 0;
   }
   
   .results-title {

@@ -62,6 +62,57 @@ export interface FileGroup {
   expanded: boolean;
 }
 
+export interface PublicCloneResult {
+  id: string;
+  cdr3_aa: string;
+  cdr3_dna: string;
+  v_gene: string;
+  j_gene: string;
+  sequence_count: number;
+  patient_count: number;
+  patients: string[];
+  sequences: string[];
+  unique_cdr3_variants: number;
+  avg_intra_cluster_similarity: number;
+}
+
+export interface VisualizationData {
+  heatmap: {
+    clones: string[];
+    patients: string[];
+    matrix: number[][];
+    frequencies: number[][];
+  };
+  chord: {
+    nodes: string[];
+    links: Array<{source: string; target: string; value: number}>;
+  };
+  upset: {
+    sets: Record<string, number>;
+    intersections: Array<{sets: string[]; size: number}>;
+  };
+  network: {
+    nodes: Array<{id: string; type: 'clone' | 'patient'; label: string}>;
+    edges: Array<{source: string; target: string; count: number}>;
+  };
+}
+
+export interface PublicClonesData {
+  public_clones: PublicCloneResult[];
+  top_x: PublicCloneResult[];
+  stats: {
+    total_public_clones: number;
+    total_sequences_in_public_clones: number;
+    max_patient_sharing: number;
+    total_patients: number;
+    clustering_mode: string;
+    similarity_threshold: number;
+    top_n_displayed: number;
+  };
+  method: string;
+  visualizations: VisualizationData;
+}
+
 export interface ResultsState {
   sequences: SequenceData[];
   fileGroups: FileGroup[];
@@ -71,6 +122,8 @@ export interface ResultsState {
   selectedDlSequenceId: string | null;
   treeImages: string[];
   outputDir: string | null;
+  publicClonesData: PublicClonesData | null;
+  isAnalyzingPublicClones: boolean;
 }
 
 export interface AnalysisState {
@@ -120,7 +173,9 @@ export const resultsState: Writable<ResultsState> = writable({
   selectedSequenceId: null,
   selectedDlSequenceId: null,
   treeImages: [],
-  outputDir: null
+  outputDir: null,
+  publicClonesData: null,
+  isAnalyzingPublicClones: false
 });
 
 
@@ -363,4 +418,23 @@ export function toggleDlFileGroup(filename: string): void {
     )
   }));
 }
+
+// Public clone actions
+export const publicClonesActions = {
+  startAnalysis() {
+    resultsState.update(s => ({ ...s, isAnalyzingPublicClones: true }));
+  },
+  
+  updateResults(data: PublicClonesData) {
+    resultsState.update(s => ({
+      ...s,
+      publicClonesData: data,
+      isAnalyzingPublicClones: false
+    }));
+  },
+  
+  clearResults() {
+    resultsState.update(s => ({ ...s, publicClonesData: null }));
+  }
+};
 

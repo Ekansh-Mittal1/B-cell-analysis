@@ -4,8 +4,9 @@
   import SequenceDetails from './SequenceDetails.svelte';
   import DlSequenceBrowser from './DlSequenceBrowser.svelte';
   import PhylogeneticTrees from './PhylogeneticTrees.svelte';
+  import PublicClones from './PublicClones.svelte';
   
-  type Tab = 'browser' | 'dl-browser' | 'trees';
+  type Tab = 'browser' | 'dl-browser' | 'trees' | 'public-clones';
   let activeTab: Tab = 'browser';
   let isExporting = false;
 
@@ -201,6 +202,24 @@
           <span class="tab-badge">{$resultsState.treeImages.length}</span>
         {/if}
       </button>
+      <button 
+        class="tab" 
+        class:active={activeTab === 'public-clones'}
+        on:click={() => activeTab = 'public-clones'}
+      >
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+          <circle cx="4" cy="4" r="3" stroke="currentColor" stroke-width="1.5"/>
+          <circle cx="12" cy="4" r="3" stroke="currentColor" stroke-width="1.5"/>
+          <circle cx="8" cy="12" r="3" stroke="currentColor" stroke-width="1.5"/>
+          <path d="M6 5l4 6M10 5l-4 6" stroke="currentColor" stroke-width="1.5"/>
+        </svg>
+        Public Clones
+        {#if $resultsState.publicClonesData}
+          <span class="tab-badge">
+            {$resultsState.publicClonesData.stats.total_public_clones}
+          </span>
+        {/if}
+      </button>
       </div>
     </div>
   </div>
@@ -256,8 +275,10 @@
           {/if}
         </main>
       </div>
-    {:else}
+    {:else if activeTab === 'trees'}
       <PhylogeneticTrees />
+    {:else if activeTab === 'public-clones'}
+      <PublicClones />
     {/if}
   </div>
 </div>

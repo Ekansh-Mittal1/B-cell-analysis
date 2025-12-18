@@ -208,6 +208,100 @@ export class BackendRunner {
   }
 
   /**
+   * Run public clone analysis
+   */
+  runPublicCloneAnalysis(
+    config: any,
+    handlers: { onResult: Function; onComplete: Function; onError: Function }
+  ): void {
+    const pipelineScript = path.join(this.options.backendDir, 'pipeline_runner.py');
+    
+    // Prepare environment
+    const env = {
+      ...process.env,
+      PATH: `${this.options.binDir}:${process.env.PATH}`,
+      IGDATA: this.options.dataDir
+    };
+
+    // Spawn Python process
+    this.process = spawn(this.options.pythonPath!, [pipelineScript], {
+      cwd: this.options.backendDir,
+      env,
+      stdio: ['pipe', 'pipe', 'pipe']
+    });
+
+    if (!this.process.stdout || !this.process.stdin) {
+      handlers.onError('Failed to create process streams');
+      return;
+    }
+
+    // Set up line reader for NDJSON output
+    this.rl = readline.createInterface({
+      input: this.process.stdout,
+      crlfDelay: Infinity
+    });
+
+    // Handle each line of NDJSON output
+    this.rl.on('line', (line: string) => {
+      if (!line || !line.trim()) return;
+      
+      try {
+        const message = JSON.parse(line);
+        console.log('[PublicClones] Message type:', message.type);
+        
+        if (message.type === 'result' && message.artifact === 'public_clones') {
+          handlers.onResult(message);
+        } else if (message.type === 'complete') {
+          handlers.onComplete(message);
+        } else if (message.type === 'log') {
+          console.log(`[PublicClones ${message.level}]:`, message.message);
+        } else if (message.type === 'progress') {
+          console.log(`[PublicClones Progress]: ${message.percent}% - ${message.message}`);
+        }
+      } catch (error) {
+        console.log('[PublicClones raw]:', line);
+      }
+    });
+
+    // Handle stderr
+    this.process.stderr?.on('data', (data: Buffer) => {
+      console.error('[PublicClones stderr]:', data.toString());
+    });
+
+    // Handle process exit
+    this.process.on('exit', (code: number | null) => {
+      console.log(`PublicClones process exited with code ${code}`);
+      this.cleanup();
+      
+      if (code !== 0 && code !== null) {
+        handlers.onError(`Process exited with code ${code}`);
+      }
+    });
+
+    // Handle process errors
+    this.process.on('error', (error: Error) => {
+      console.error('PublicClones process error:', error);
+      handlers.onError(error.message);
+      this.cleanup();
+    });
+
+    // Send the configuration
+    const startMessage = JSON.stringify({
+      action: 'public_clones',
+      config: {
+        output_dir: config.output_dir,
+        mode: config.mode || 'lenient',
+        similarity_threshold: config.similarity_threshold || 0.85,
+        max_mismatches: config.max_mismatches || 2,
+        top_n: config.top_n || 10
+      }
+    });
+
+    console.log('[PublicClones] Sending config:', startMessage);
+    this.process.stdin.write(startMessage + '\n');
+  }
+
+  /**
    * Cancel the running pipeline
    */
   cancel(): void {

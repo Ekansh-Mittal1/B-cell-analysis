@@ -742,7 +742,8 @@ class PipelineRunner:
             self.emit.result("sequences", data={
                 "sequences": sequences,
                 "file_groups": file_groups,
-                "total_count": len(sequences)
+                "total_count": len(sequences),
+                "output_dir": self.output_dir
             })
             
             return True
@@ -970,6 +971,87 @@ class PipelineRunner:
             return False
 
 
+def run_public_clone_analysis(config: Dict[str, Any], emit) -> bool:
+    """
+    Run public clone analysis on existing results.
+    
+    Args:
+        config: Configuration dictionary with analysis parameters
+        emit: NDJSONEmitter for output
+    
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        from utils.public_clones import analyze_public_clones
+        from Bio import SeqIO
+        
+        output_dir = config.get('output_dir')
+        mode = config.get('mode', 'lenient')
+        similarity_threshold = config.get('similarity_threshold', 0.85)
+        max_mismatches = config.get('max_mismatches', 2)
+        top_n = config.get('top_n', 10)
+        
+        emit.log("info", f"Starting public clone analysis in {mode} mode")
+        emit.progress("public_clones", 10, "Loading clonality data...")
+        
+        # Paths to existing data
+        clone_pass_path = os.path.join(output_dir, 'ig_out_data_db-pass_clone-pass_germ-pass.tsv')
+        combined_fasta = os.path.join(output_dir, 'combined.fasta')
+        
+        # Check if required files exist
+        if not os.path.exists(clone_pass_path):
+            emit.log("error", f"Clonality file not found: {clone_pass_path}")
+            emit.complete(False, "Required clonality data not found. Please run main analysis first.")
+            return False
+        
+        if not os.path.exists(combined_fasta):
+            emit.log("error", f"Combined FASTA file not found: {combined_fasta}")
+            emit.complete(False, "Required FASTA file not found. Please run main analysis first.")
+            return False
+        
+        emit.progress("public_clones", 30, "Loading sequence metadata...")
+        
+        # Load sequence metadata (for file grouping)
+        sequences_data = []
+        for record in SeqIO.parse(combined_fasta, "fasta"):
+            sequences_data.append({
+                'id': record.id,
+                'file': None  # Will be extracted from ID
+            })
+        
+        emit.progress("public_clones", 50, "Analyzing public clones...")
+        emit.log("info", f"Analyzing {len(sequences_data)} sequences with top_n={top_n}")
+        
+        # Run analysis
+        results = analyze_public_clones(
+            clone_pass_path,
+            sequences_data,
+            mode=mode,
+            similarity_threshold=similarity_threshold,
+            max_aa_mismatches=max_mismatches,
+            top_n=top_n
+        )
+        
+        emit.progress("public_clones", 90, "Generating visualization data...")
+        
+        # Emit results
+        emit.result('public_clones', data=results)
+        
+        stats = results.get('stats', {})
+        emit.log("info", f"Found {stats.get('total_public_clones', 0)} public clones across {stats.get('total_patients', 0)} patients")
+        
+        emit.progress("public_clones", 100, "Public clone analysis complete!")
+        emit.complete(True)
+        return True
+        
+    except Exception as e:
+        emit.log("error", f"Public clone analysis failed: {str(e)}")
+        emit.log("debug", traceback.format_exc())
+        emit.complete(False, str(e))
+        return False
+
+
 def main():
     """Main entry point."""
     emit = NDJSONEmitter
@@ -985,12 +1067,18 @@ def main():
         
         config = json.loads(config_line)
         
-        if config.get('action') == 'run':
+        action = config.get('action')
+        
+        if action == 'run':
             runner = PipelineRunner(config.get('config', {}))
             success = runner.run()
             return 0 if success else 1
+        elif action == 'public_clones':
+            # Run public clone analysis on existing results
+            success = run_public_clone_analysis(config.get('config', {}), emit)
+            return 0 if success else 1
         else:
-            emit.complete(False, f"Unknown action: {config.get('action')}")
+            emit.complete(False, f"Unknown action: {action}")
             return 1
             
     except json.JSONDecodeError as e:

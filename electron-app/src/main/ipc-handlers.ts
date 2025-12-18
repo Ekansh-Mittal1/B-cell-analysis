@@ -25,6 +25,7 @@ export function setupIpcHandlers(
   ipcMain.removeHandler('dialog:selectDirectory');
   ipcMain.removeHandler('dialog:selectFile');
   ipcMain.removeHandler('dialog:saveFile');
+  ipcMain.removeHandler('pipeline:runPublicCloneAnalysis');
   
   // Dialog: Select directory
   ipcMain.handle('dialog:selectDirectory', async (event) => {
@@ -188,6 +189,34 @@ export function setupIpcHandlers(
   // Cancel pipeline
   ipcMain.handle('pipeline:cancel', async () => {
     backendRunner.cancel();
+  });
+
+  // Run public clone analysis
+  ipcMain.handle('pipeline:runPublicCloneAnalysis', async (event, config: any) => {
+    console.log('[IPC] Running public clone analysis with config:', config);
+    
+    return new Promise((resolve, reject) => {
+      // Set up event forwarding
+      const onResult = (data: any) => {
+        console.log('[IPC] Public clone result:', data);
+        mainWindow?.webContents.send('pipeline:publicCloneResult', data);
+      };
+      
+      const onComplete = (data: any) => {
+        console.log('[IPC] Public clone analysis complete');
+        mainWindow?.webContents.send('pipeline:publicCloneComplete', data);
+        resolve(data);
+      };
+      
+      const onError = (error: string) => {
+        console.error('[IPC] Public clone analysis error:', error);
+        mainWindow?.webContents.send('pipeline:publicCloneError', error);
+        reject(new Error(error));
+      };
+      
+      // Run with action: public_clones
+      backendRunner.runPublicCloneAnalysis(config, { onResult, onComplete, onError });
+    });
   });
 
   // Read file contents

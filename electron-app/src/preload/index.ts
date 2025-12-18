@@ -75,6 +75,16 @@ const api = {
   cancelPipeline: (): Promise<void> => 
     ipcRenderer.invoke('pipeline:cancel'),
 
+  // Public clone analysis
+  runPublicCloneAnalysis: (config: {
+    output_dir: string;
+    mode: 'exact' | 'lenient' | 'custom';
+    similarity_threshold?: number;
+    max_mismatches?: number;
+    top_n?: number;
+  }): Promise<{ success: boolean; error?: string }> =>
+    ipcRenderer.invoke('pipeline:runPublicCloneAnalysis', config),
+
   // Pipeline events
   onPipelineProgress: (callback: (data: { stage: string; percent: number; message: string }) => void) => {
     const handler = (_: any, data: any) => callback(data);
@@ -118,6 +128,25 @@ const api = {
     const handler = (_: any, data: any) => callback(data);
     ipcRenderer.on('pipeline:error', handler);
     return () => ipcRenderer.removeListener('pipeline:error', handler);
+  },
+
+  // Public clone analysis events
+  onPublicCloneResult: (callback: (data: any) => void) => {
+    const handler = (_: any, data: any) => callback(data);
+    ipcRenderer.on('pipeline:publicCloneResult', handler);
+    return () => ipcRenderer.removeListener('pipeline:publicCloneResult', handler);
+  },
+
+  onPublicCloneComplete: (callback: (data: any) => void) => {
+    const handler = (_: any, data: any) => callback(data);
+    ipcRenderer.on('pipeline:publicCloneComplete', handler);
+    return () => ipcRenderer.removeListener('pipeline:publicCloneComplete', handler);
+  },
+
+  onPublicCloneError: (callback: (data: any) => void) => {
+    const handler = (_: any, data: any) => callback(data);
+    ipcRenderer.on('pipeline:publicCloneError', handler);
+    return () => ipcRenderer.removeListener('pipeline:publicCloneError', handler);
   },
 
   // File system operations

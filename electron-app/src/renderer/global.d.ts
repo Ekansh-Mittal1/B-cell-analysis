@@ -84,6 +84,15 @@ interface ElectronAPI {
   sendThresholdResponse: (value: number) => Promise<void>;
   cancelPipeline: () => Promise<void>;
 
+  // Public clone analysis
+  runPublicCloneAnalysis: (config: {
+    output_dir: string;
+    mode: 'exact' | 'lenient' | 'custom';
+    similarity_threshold?: number;
+    max_mismatches?: number;
+    top_n?: number;
+  }) => Promise<{ success: boolean; error?: string }>;
+
   // Pipeline events
   onPipelineProgress: (callback: (data: ProgressData) => void) => () => void;
   onPipelineLog: (callback: (data: LogData) => void) => () => void;
@@ -91,6 +100,11 @@ interface ElectronAPI {
   onThresholdRequest: (callback: (data: ThresholdRequestData) => void) => () => void;
   onPipelineComplete: (callback: (data: CompleteData) => void) => () => void;
   onPipelineError: (callback: (data: ErrorData) => void) => () => void;
+
+  // Public clone analysis events
+  onPublicCloneResult: (callback: (data: any) => void) => () => void;
+  onPublicCloneComplete: (callback: (data: any) => void) => () => void;
+  onPublicCloneError: (callback: (data: any) => void) => () => void;
 
   // File system operations
   readFile: (filePath: string) => Promise<FileResult>;

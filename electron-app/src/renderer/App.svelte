@@ -38,6 +38,14 @@
           console.log('[App] Received result event:', data);
           if (data.artifact === 'sequences' && data.data) {
             processSequenceResults(data.data);
+            // Capture and store the output directory
+            if (data.data.output_dir) {
+              console.log('[App] Storing output directory:', data.data.output_dir);
+              resultsState.update(s => ({
+                ...s,
+                outputDir: data.data.output_dir
+              }));
+            }
           }
           if (data.artifact === 'dl_sequences' && data.data) {
             processDlSequenceResults(data.data);

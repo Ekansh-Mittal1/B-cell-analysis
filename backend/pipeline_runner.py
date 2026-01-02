@@ -614,7 +614,20 @@ class PipelineRunner:
                 for query_id in sequence_names:
                     if pd.isna(query_id):
                         continue
+                    
+                    # IgBLAST may prefix reversed sequences with "reversed|"
+                    # Try multiple matching strategies to find the sequence data
                     seq_data = blast_df[blast_df['query id'] == query_id]
+                    
+                    # If not found, try with "reversed|" prefix
+                    if seq_data.empty:
+                        seq_data = blast_df[blast_df['query id'] == f"reversed|{query_id}"]
+                    
+                    # If still not found, try matching without the reversed prefix
+                    # (in case query_id accidentally has the prefix)
+                    if seq_data.empty and query_id.startswith('reversed|'):
+                        clean_id = query_id.replace('reversed|', '', 1)
+                        seq_data = blast_df[blast_df['query id'] == clean_id]
                     
                     # Skip if no blast data for this sequence
                     if seq_data.empty:
@@ -700,10 +713,31 @@ class PipelineRunner:
                     clone_data[seq_id] = {
                         'clone_id': int(clone_id) if clone_id is not None else None,
                         'clone_count': len(clone_df[clone_df['clone_id'] == clone_id]) if clone_id is not None else 0,
-                        'productive': True,  # Assuming productive if in pass file
+                        'productive': True,  # Productive sequences in pass file
                         'cdr3_dna': junction,
                         'cdr3_peptide': junction_aa
                     }
+            
+            # Load non-productive sequences from fail file (if --failed flag was used)
+            clone_fail_path = os.path.join(self.output_dir, 'ig_out_data_db-fail.tsv')
+            if os.path.exists(clone_fail_path):
+                self.emit.log("info", f"Loading non-productive sequences from fail file")
+                fail_df = pd.read_table(clone_fail_path)
+                for _, row in fail_df.iterrows():
+                    seq_id = str(row['sequence_id'])
+                    
+                    # Extract CDR3 data from junction columns (if available)
+                    junction = str(row['junction']) if pd.notna(row['junction']) else None
+                    junction_aa = str(row['junction_aa']) if pd.notna(row['junction_aa']) else None
+                    
+                    clone_data[seq_id] = {
+                        'clone_id': None,  # Non-productive sequences don't get clone IDs
+                        'clone_count': 0,
+                        'productive': False,  # Non-productive sequences in fail file
+                        'cdr3_dna': junction,
+                        'cdr3_peptide': junction_aa
+                    }
+                self.emit.log("info", f"Added {len(fail_df)} non-productive sequences")
             
             # Merge clone data (including CDR3 from clonality file) into sequences
             for seq in sequences:

@@ -12,12 +12,13 @@ outs_dir = os.path.join(geneHome, "outs")
 
 def make_db(i, rj, rv, rd, s):
     # MakeDb.py creates output in current directory, so change to outs_dir
+    # Use --failed flag to also process non-productive sequences
     original_cwd = os.getcwd()
     try:
         os.chdir(outs_dir)
         # Use relative paths from outs_dir
         i_rel = os.path.relpath(i, outs_dir) if os.path.isabs(i) else i
-        cmd = ['MakeDb.py', 'igblast', '-i', i_rel, '-r', rj, rv, rd, '-s', s]
+        cmd = ['MakeDb.py', 'igblast', '-i', i_rel, '-r', rj, rv, rd, '-s', s, '--failed']
         print(cmd)
         command = subprocess.Popen(cmd, stdout=subprocess.PIPE)
         output = command.communicate()[0]

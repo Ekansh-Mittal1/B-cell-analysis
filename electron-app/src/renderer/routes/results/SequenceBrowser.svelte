@@ -79,9 +79,14 @@
               >
                 <div class="seq-main">
                   <span class="seq-name">{cleanSequenceName(seq.name)}</span>
-                  {#if seq.clone_id}
-                    <span class="clone-badge">Clone {seq.clone_id}</span>
-                  {/if}
+                  <div class="badges">
+                    {#if seq.clone_id}
+                      <span class="clone-badge">Clone {seq.clone_id}</span>
+                    {/if}
+                    {#if seq.productive === false}
+                      <span class="nonproductive-badge">Non-productive</span>
+                    {/if}
+                  </div>
                 </div>
               </button>
             {/each}
@@ -275,10 +280,26 @@
     color: var(--color-primary);
   }
   
+  .badges {
+    display: flex;
+    gap: var(--space-1);
+    flex-wrap: wrap;
+  }
+  
   .clone-badge {
     padding: 2px 6px;
     background: var(--color-info-light);
     color: var(--color-info);
+    border-radius: var(--border-radius-sm);
+    font-size: 10px;
+    font-weight: var(--font-semibold);
+    flex-shrink: 0;
+  }
+  
+  .nonproductive-badge {
+    padding: 2px 6px;
+    background: var(--color-warning-light);
+    color: var(--color-warning);
     border-radius: var(--border-radius-sm);
     font-size: 10px;
     font-weight: var(--font-semibold);

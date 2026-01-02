@@ -98,13 +98,39 @@
        </rect>
       </property>
      </widget>
+     <widget class="QLabel" name="searchLabel">
+      <property name="geometry">
+       <rect>
+        <x>30</x>
+        <y>60</y>
+        <width>100</width>
+        <height>16</height>
+       </rect>
+      </property>
+      <property name="text">
+       <string>Search:</string>
+      </property>
+     </widget>
+     <widget class="QLineEdit" name="searchBox">
+      <property name="geometry">
+       <rect>
+        <x>30</x>
+        <y>80</y>
+        <width>256</width>
+        <height>21</height>
+       </rect>
+      </property>
+      <property name="placeholderText">
+       <string>Search FASTA files or sequences...</string>
+      </property>
+     </widget>
      <widget class="QTreeWidget" name="nameList">
       <property name="geometry">
        <rect>
         <x>30</x>
-        <y>90</y>
+        <y>110</y>
         <width>256</width>
-        <height>391</height>
+        <height>371</height>
        </rect>
       </property>
       <property name="columnCount">

@@ -392,6 +392,56 @@ class mainWindow(QMainWindow):
             fastaList = sorted(fastaList, key=self.takename)
 
             return fastaList
+    
+    def filterTree(self, search_text):
+        """Filter tree items based on search text. Shows/hides FASTA files and sequences."""
+        if not hasattr(self, 'tree') or not self.tree:
+            return
+        
+        search_text = search_text.lower().strip()
+        
+        # If search is empty, show all items
+        if not search_text:
+            root = self.tree.invisibleRootItem()
+            for i in range(root.childCount()):
+                item = root.child(i)
+                item.setHidden(False)
+                # Show all children
+                for j in range(item.childCount()):
+                    item.child(j).setHidden(False)
+            return
+        
+        # Filter items
+        root = self.tree.invisibleRootItem()
+        for i in range(root.childCount()):
+            fasta_item = root.child(i)
+            fasta_name = fasta_item.text(0).lower()
+            
+            # Check if FASTA file name matches
+            fasta_matches = search_text in fasta_name
+            
+            # Check if any child sequence matches
+            has_matching_child = False
+            for j in range(fasta_item.childCount()):
+                seq_item = fasta_item.child(j)
+                seq_name = seq_item.text(0).lower()
+                
+                if search_text in seq_name:
+                    seq_item.setHidden(False)
+                    has_matching_child = True
+                else:
+                    seq_item.setHidden(True)
+            
+            # Show FASTA file if it matches or has matching children
+            if fasta_matches or has_matching_child:
+                fasta_item.setHidden(False)
+                # If FASTA matches, show all its children
+                if fasta_matches:
+                    for j in range(fasta_item.childCount()):
+                        fasta_item.child(j).setHidden(False)
+            else:
+                fasta_item.setHidden(True)
+    
     #asks the user for file input, creates a new file at that location and stores db-pass-clone pass data there
     def exportData(self):
         name = QFileDialog.getSaveFileName(self, 'Export Analysis Data', "Analysis_Data.tsv", "Data (*.tsv)")[0]
@@ -595,6 +645,7 @@ class mainWindow(QMainWindow):
         self.plab = self.findChild(QLabel, "Path_label")
         self.align = self.findChild(QTextEdit, "AlignmentBox")
         self.tree = self.findChild(QTreeWidget, "nameList")
+        self.search_box = self.findChild(QLineEdit, "searchBox")
         self.igout = self.findChild(QTextEdit, "igblastOut")
         self.tree_list = self.findChild(QListWidget, "tree_select")
         self.tree_image = self.findChild(QLabel, "graphics_label")
@@ -640,6 +691,13 @@ class mainWindow(QMainWindow):
                 if seq_name.endswith("_" + b_name):
                     seq_item = QTreeWidgetItem(fasta_path)
                     seq_item.setText(0, seq_name)
+        
+        # Expand all items by default so users can see the structure
+        self.tree.expandAll()
+        
+        # Connect search box to filter function
+        if self.search_box:
+            self.search_box.textChanged.connect(self.filterTree)
         
         #if the user selects the show dist plot option, it will show it
         self.Show_Distrobution_Plot.triggered.connect(clone.display_Image)

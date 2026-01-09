@@ -59,12 +59,17 @@ export class BackendRunner {
       IGDATA: this.options.dataDir
     };
 
-    // Spawn Python process
+    // Spawn Python process with detached flag to create a new process group
+    // This allows us to kill all child processes (IgBLAST, R scripts, etc.)
     this.process = spawn(this.options.pythonPath!, [pipelineScript], {
       cwd: this.options.backendDir,
       env,
-      stdio: ['pipe', 'pipe', 'pipe']
+      stdio: ['pipe', 'pipe', 'pipe'],
+      detached: true  // Create new process group
     });
+
+    // Unref the process so it doesn't keep the Node process alive
+    this.process.unref();
 
     if (!this.process.stdout || !this.process.stdin) {
       callbacks.onError(new Error('Failed to create process streams'));
@@ -223,11 +228,13 @@ export class BackendRunner {
       IGDATA: this.options.dataDir
     };
 
-    // Spawn Python process
+    // Spawn Python process with detached flag to create a new process group
+    // This allows us to kill all child processes (IgBLAST, R scripts, etc.)
     this.process = spawn(this.options.pythonPath!, [pipelineScript], {
       cwd: this.options.backendDir,
       env,
-      stdio: ['pipe', 'pipe', 'pipe']
+      stdio: ['pipe', 'pipe', 'pipe'],
+      detached: true  // Create new process group
     });
 
     if (!this.process.stdout || !this.process.stdin) {
@@ -305,27 +312,38 @@ export class BackendRunner {
    * Cancel the running pipeline
    */
   cancel(): void {
+    console.log('[BackendRunner] Cancel requested');
+    
+    // Clear callbacks immediately to prevent race conditions
+    this.runCallbacks = null;
+    
     if (this.process) {
-      // Send cancel message
+      // Send cancel message to backend
       try {
         this.process.stdin?.write(JSON.stringify({ type: 'cancel' }) + '\n');
+        console.log('[BackendRunner] Sent cancel message to backend');
       } catch (e) {
-        // Ignore write errors during cancellation
+        console.warn('[BackendRunner] Failed to send cancel message:', e);
       }
       
-      // Give it a moment to clean up, then force kill
-      setTimeout(() => {
-        if (this.process) {
-          this.process.kill('SIGTERM');
-          setTimeout(() => {
-            if (this.process) {
-              this.process.kill('SIGKILL');
-            }
-          }, 2000);
+      // Kill entire process group immediately
+      // Using negative PID kills all processes in the group (Python + all child processes)
+      const pid = this.process.pid;
+      if (pid) {
+        try {
+          console.log('[BackendRunner] Killing process group:', pid);
+          // Kill the entire process group with SIGKILL (immediate termination)
+          process.kill(-pid, 'SIGKILL');
+          console.log('[BackendRunner] Process group killed');
+        } catch (e: any) {
+          console.warn('[BackendRunner] Failed to kill process group, trying individual kill:', e.message);
+          // Fallback: kill just the main process
+          this.process.kill('SIGKILL');
         }
-      }, 1000);
+      }
     }
     
+    // Cleanup resources
     this.cleanup();
   }
 

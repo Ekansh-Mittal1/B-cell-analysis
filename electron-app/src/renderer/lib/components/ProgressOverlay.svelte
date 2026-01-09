@@ -1,8 +1,21 @@
 <script lang="ts">
   import { analysisState } from '../stores/app';
   
+  let isCancelling = false;
+  
   function handleCancel() {
-    if (window.electronAPI) {
+    if (window.electronAPI && !isCancelling) {
+      isCancelling = true;
+      console.log('[ProgressOverlay] Cancelling pipeline...');
+      
+      // Hide UI immediately (optimistic update)
+      analysisState.update(s => ({
+        ...s,
+        isRunning: false,
+        error: 'Analysis cancelled by user'
+      }));
+      
+      // Send cancel signal to backend
       window.electronAPI.cancelPipeline();
     }
   }
@@ -48,8 +61,12 @@
     </div>
     
     <div class="actions">
-      <button class="btn btn-secondary" on:click={handleCancel}>
-        Cancel Analysis
+      <button 
+        class="btn btn-secondary" 
+        on:click={handleCancel}
+        disabled={isCancelling}
+      >
+        {isCancelling ? 'Cancelling...' : 'Cancel Analysis'}
       </button>
     </div>
     

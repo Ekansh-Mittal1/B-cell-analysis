@@ -222,9 +222,12 @@ export function setupIpcHandlers(
   // Read file contents
   ipcMain.handle('fs:readFile', async (_, filePath: string) => {
     try {
-      const content = fs.readFileSync(filePath, 'utf-8');
-      return { success: true, content };
+      console.log('[IPC] Reading file:', filePath);
+      const data = fs.readFileSync(filePath, 'utf-8');
+      console.log('[IPC] Successfully read file, length:', data.length);
+      return { success: true, data };
     } catch (error: any) {
+      console.error('[IPC] Failed to read file:', error.message);
       return { success: false, error: error.message };
     }
   });

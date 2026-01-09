@@ -44,44 +44,55 @@ for (i in seq_along(newick_files)) {
             }
         }
         
-        # Create plot with larger size
-        png(png_file, width = 3200, height = 2200, res = 120)
+        # Create plot with larger size (optimized for horizontal layout like IgPhyML)
+        # Wide format to accommodate tree branching left-to-right
+        png(png_file, width = 3200, height = 2400, res = 120)
         
-        # Calculate maximum label length for proper spacing
+        # Set margins: bottom, left, top (for title), right (large for labels)
+        par(mar = c(4, 2, 4, 10))
+        
+        # Ladderize tree for clearer lineage structure (like IgPhyML)
+        tree <- ladderize(tree, right = TRUE)
+        
+        # Identify germline tip for highlighting
+        germ_tips <- grep("GERM", tree$tip.label, ignore.case = TRUE)
+        
+        # Create color vector for tips (germline in red, others in black)
+        tip_colors <- rep("black", length(tree$tip.label))
+        if (length(germ_tips) > 0) {
+            tip_colors[germ_tips] <- "red"
+        }
+        
+        # Calculate maximum label length for proper x-axis limits
         max_label_length <- max(nchar(tree$tip.label))
         
-        # Set margins: bottom, left, top, right
-        par(mar = c(4, 2, 4, 2))
-        
-        # First, plot tree invisibly to get the coordinate system
+        # First plot invisibly to get coordinate system
         plot(tree, 
              type = "phylogram",
              direction = "rightwards",
              show.tip.label = FALSE,
-             edge.width = 3,
              plot = FALSE)
         
-        # Get the last plot parameters
+        # Get tree depth from last plot
         last_plot <- get("last_plot.phylo", envir = .PlotPhyloEnv)
-        
-        # Calculate proper x limits
-        # Tree depth + space for labels
         tree_depth <- max(last_plot$xx)
-        label_space <- max_label_length * 0.015  # Space needed for labels
+        
+        # Calculate x limit: tree depth + space for labels
+        label_space <- max_label_length * 0.012  # Adjust factor for label spacing
         x_max <- tree_depth + label_space
         
-        # Now plot for real with proper limits
+        # Now plot for real with proper limits (IgPhyML style: horizontal, left to right)
         plot(tree, 
-             type = "phylogram",
-             direction = "rightwards",
+             type = "phylogram",        # Phylogram shows branch lengths (like IgPhyML)
+             direction = "rightwards",  # Horizontal layout like IgPhyML
              main = paste("Phylogenetic Tree:", base_name),
-             cex = 1.6,
-             edge.width = 4,
-             tip.color = "darkblue",
-             label.offset = tree_depth * 0.02,
+             cex = 1.3,
+             edge.width = 3,
+             tip.color = tip_colors,
+             label.offset = tree_depth * 0.01,  # Small offset for labels
              show.node.label = FALSE,
              font = 1,
-             adj = 0,
+             adj = 0,  # Left-align labels
              x.lim = c(0, x_max),
              use.edge.length = TRUE)
         

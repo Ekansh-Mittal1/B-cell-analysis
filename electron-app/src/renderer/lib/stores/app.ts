@@ -113,6 +113,12 @@ export interface PublicClonesData {
   visualizations: VisualizationData;
 }
 
+export interface TreeMetadata {
+  path: string;
+  clone_id: number | null;
+  clone_size: number;
+}
+
 export interface ResultsState {
   sequences: SequenceData[];
   fileGroups: FileGroup[];
@@ -121,6 +127,7 @@ export interface ResultsState {
   selectedSequenceId: string | null;
   selectedDlSequenceId: string | null;
   treeImages: string[];
+  treeMetadata: TreeMetadata[];
   outputDir: string | null;
   publicClonesData: PublicClonesData | null;
   isAnalyzingPublicClones: boolean;
@@ -173,6 +180,7 @@ export const resultsState: Writable<ResultsState> = writable({
   selectedSequenceId: null,
   selectedDlSequenceId: null,
   treeImages: [],
+  treeMetadata: [],
   outputDir: null,
   publicClonesData: null,
   isAnalyzingPublicClones: false

@@ -1,78 +1,53 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { resultsState } from '../../lib/stores/app';
+  import InteractiveTree from './InteractiveTree.svelte';
   
   let selectedTreeIndex = 0;
-  let treeImageData: string[] = [];
-  let isLoading = true;
-  let isExporting = false;
+  let isLoading = false;
   
   onMount(async () => {
-    if (window.electronAPI && $resultsState.treeImages.length > 0) {
-      // Load all tree images
-      const images = await Promise.all(
-        $resultsState.treeImages.map(async (path) => {
-          const result = await window.electronAPI.readImageBase64(path);
-          return result.success ? result.data! : '';
-        })
-      );
-      treeImageData = images;
-    }
-    isLoading = false;
+    console.log('[PhylogeneticTrees] Mounted with', $resultsState.treeImages.length, 'trees');
   });
   
-  function getTreeName(path: string): string {
+  function getNewickPath(pngPath: string): string {
+    // Normalize path: replace .png with .newick and resolve any ../ paths
+    let newickPath = pngPath.replace('.png', '.newick');
+    // If path contains ../, we need to resolve it properly
+    // The backend should send absolute paths, but handle relative paths just in case
+    if (newickPath.includes('../')) {
+      // For now, just return as-is - the backend should send absolute paths
+      // If there are still issues, we may need to resolve relative to outputDir
+      console.warn('[PhylogeneticTrees] Newick path contains ../:', newickPath);
+    }
+    return newickPath;
+  }
+  
+  function getTreeName(path: string, index: number): string {
+    // Try to get metadata for better naming
+    const metadata = $resultsState.treeMetadata?.[index];
+    
+    if (metadata && metadata.clone_id !== null) {
+      const cloneId = metadata.clone_id;
+      const cloneSize = metadata.clone_size;
+      
+      if (cloneSize > 0) {
+        return `Clone ${cloneId} (${cloneSize} sequences)`;
+      } else {
+        return `Clone ${cloneId}`;
+      }
+    }
+    
+    // Fallback to filename-based naming
     const filename = path.split('/').pop() || '';
+    const match = filename.match(/tree_(\d+)/);
+    if (match) {
+      return `Clone ${match[1]}`;
+    }
+    
     return filename.replace('.png', '').replace(/_/g, ' ');
   }
   
-  async function exportTreeImage() {
-    if (!window.electronAPI) {
-      alert('Electron API not available');
-      return;
-    }
-    
-    if (selectedTreeIndex < 0 || selectedTreeIndex >= $resultsState.treeImages.length) {
-      alert('No tree selected');
-      return;
-    }
-    
-    const sourcePath = $resultsState.treeImages[selectedTreeIndex];
-    const treeName = getTreeName(sourcePath);
-    
-    isExporting = true;
-    
-    try {
-      // Open save dialog
-      const destPath = await window.electronAPI.saveFile({
-        defaultPath: `${treeName}.png`,
-        filters: [
-          { name: 'PNG Images', extensions: ['png'] },
-          { name: 'All Files', extensions: ['*'] }
-        ]
-      });
-      
-      if (!destPath) {
-        // User cancelled
-        isExporting = false;
-        return;
-      }
-      
-      // Copy the image file to the selected location
-      const result = await window.electronAPI.copyFile(sourcePath, destPath);
-      
-      if (result.success) {
-        alert(`Tree image exported successfully to ${destPath}`);
-      } else {
-        alert(`Failed to export tree image: ${result.error || 'Unknown error'}`);
-      }
-    } catch (error: any) {
-      console.error('Export error:', error);
-      alert(`Export failed: ${error.message || 'Unknown error'}`);
-    } finally {
-      isExporting = false;
-    }
-  }
 </script>
 
 <div class="trees-container">
@@ -107,7 +82,7 @@
               <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
                 <path d="M8 2v4M8 6H4v4M8 6h4v4M4 10v4M12 10v4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
               </svg>
-              <span class="tree-name">{getTreeName(treePath)}</span>
+              <span class="tree-name">{getTreeName(treePath, index)}</span>
             </button>
           {/each}
         </div>
@@ -120,44 +95,22 @@
             <div class="spinner"></div>
             <span>Loading tree images...</span>
           </div>
-        {:else if treeImageData[selectedTreeIndex]}
-          <div class="tree-image-container">
+        {:else}
+          <div class="tree-view-container">
             <div class="tree-header">
               <div class="tree-header-main">
-                <h2 class="tree-title">{getTreeName($resultsState.treeImages[selectedTreeIndex])}</h2>
-                <div class="tree-info-note">
-                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-                    <circle cx="8" cy="8" r="7" stroke="currentColor" stroke-width="1.5"/>
-                    <path d="M8 6v4M8 4v0" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-                  </svg>
-                  <span>Trees show unique sequences only. Sequence counts are displayed on tip labels (e.g., "×5" indicates 5 identical sequences).</span>
-                </div>
-              </div>
-              <div class="tree-actions">
-                <button 
-                  class="btn btn-secondary btn-sm"
-                  on:click={exportTreeImage}
-                  disabled={isExporting || isLoading}
-                  title="Export tree image to PNG file"
-                >
-                  <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-                    <path d="M7 1v8M4 6l3 3 3-3M2 11h10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-                  </svg>
-                  {isExporting ? 'Exporting...' : 'Export'}
-                </button>
+                <h2 class="tree-title">{getTreeName($resultsState.treeImages[selectedTreeIndex], selectedTreeIndex)}</h2>
               </div>
             </div>
-            <div class="tree-image-wrapper">
-              <img 
-                src={treeImageData[selectedTreeIndex]}
-                alt="Phylogenetic tree"
-                class="tree-image"
+            
+            <div class="tree-content">
+              <!-- Interactive phylogenetic tree with export functionality -->
+              <InteractiveTree 
+                newickPath={getNewickPath($resultsState.treeImages[selectedTreeIndex])}
+                treeName={getTreeName($resultsState.treeImages[selectedTreeIndex], selectedTreeIndex)}
+                cloneSize={$resultsState.treeMetadata?.[selectedTreeIndex]?.clone_size || 0}
               />
             </div>
-          </div>
-        {:else}
-          <div class="error-state">
-            <p>Failed to load tree image</p>
           </div>
         {/if}
       </main>
@@ -350,6 +303,19 @@
     margin: 0;
   }
   
+  .viewer-note {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    font-size: 11px;
+    color: var(--gray-600);
+    margin-top: var(--space-1);
+  }
+  
+  .viewer-note svg {
+    flex-shrink: 0;
+  }
+  
   .tree-info-note {
     display: flex;
     align-items: flex-start;
@@ -399,5 +365,20 @@
     box-shadow: var(--shadow-md);
     background: white;
   }
+  
+  .tree-view-container {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  
+  .tree-content {
+    flex: 1;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+  
 </style>
 

@@ -23,6 +23,16 @@
         window.electronAPI.onPipelineProgress((data) => {
           console.log('[App] Received progress event:', data);
           setProgress(data);
+          
+          // Clear old tree data when a new analysis starts
+          if (data.stage === 'fasta' || data.stage === 'setup') {
+            console.log('[App] New analysis starting - clearing old tree data');
+            resultsState.update(s => ({
+              ...s,
+              treeImages: [],
+              treeMetadata: []
+            }));
+          }
         })
       );
       
@@ -53,7 +63,8 @@
           if (data.artifact === 'tree_images' && data.data?.images) {
             resultsState.update(s => ({
               ...s,
-              treeImages: data.data.images
+              treeImages: data.data.images,
+              treeMetadata: data.data.tree_metadata || []
             }));
           }
         })

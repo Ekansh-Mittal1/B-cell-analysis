@@ -79,11 +79,21 @@ def findDist(dbPath, pathToScript=None, pathToPlot=None):
         print(f"Warning: Database file is empty: {dbPath}")
         return 0.1  # Return default distance
     
-    command = 'Rscript'
+    # Use the direct R binary path to bypass wrapper issues
+    command = '/Library/Frameworks/R.framework/Versions/4.5-arm64/Resources/bin/Rscript'
     args = [dbPath, pathToPlot]
     cmd = [command, pathToScript] + args
+    
+    # Set up R environment explicitly to avoid "cannot find system Renviron" error
+    r_env = os.environ.copy()
+    r_env['R_HOME'] = '/Library/Frameworks/R.framework/Resources'
+    r_env['R_SHARE_DIR'] = '/Library/Frameworks/R.framework/Resources/share'
+    r_env['R_INCLUDE_DIR'] = '/Library/Frameworks/R.framework/Resources/include'
+    r_env['R_DOC_DIR'] = '/Library/Frameworks/R.framework/Resources/doc'
+    r_env['EDITOR'] = '/usr/bin/nano'
+    
     try:
-        result = subprocess.run(cmd, shell=False, stderr=subprocess.PIPE, stdout=subprocess.PIPE, timeout=300, text=True)
+        result = subprocess.run(cmd, shell=False, stderr=subprocess.PIPE, stdout=subprocess.PIPE, timeout=300, text=True, env=r_env)
         
         # Check return code - should be 0 if successful
         if result.returncode != 0:

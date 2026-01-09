@@ -48,11 +48,21 @@ except ImportError:
 class NDJSONEmitter:
     """Utility class for emitting NDJSON messages to stdout."""
     
+    log_file = None  # Will be set by PipelineRunner
+    
     @staticmethod
     def emit(message: Dict[str, Any]):
         """Emit a single NDJSON message."""
         sys.stdout.write(json.dumps(message) + '\n')
         sys.stdout.flush()
+        
+        # Also write to log file if available
+        if NDJSONEmitter.log_file and message.get('type') == 'log':
+            try:
+                with open(NDJSONEmitter.log_file, 'a') as f:
+                    f.write(f"[{message.get('level', 'info').upper()}] {message.get('message', '')}\n")
+            except:
+                pass  # Don't fail if logging fails
     
     @staticmethod
     def progress(stage: str, percent: int, message: str):
@@ -130,6 +140,18 @@ class PipelineRunner:
         else:
             self.output_dir = os.path.join(self.backend_dir, '..', 'geneGUI', 'outs')
             os.makedirs(self.output_dir, exist_ok=True)
+        
+        # Normalize the output directory path to absolute and resolve any ../
+        self.output_dir = os.path.abspath(self.output_dir)
+        
+        # Set up persistent log file
+        NDJSONEmitter.log_file = os.path.join(self.output_dir, 'pipeline.log')
+        try:
+            # Clear old log file
+            with open(NDJSONEmitter.log_file, 'w') as f:
+                f.write(f"=== Pipeline Started ===\n")
+        except:
+            NDJSONEmitter.log_file = None
         
         # State
         self.fasta_paths: List[str] = []
@@ -430,15 +452,44 @@ class PipelineRunner:
     
     def build_trees(self) -> bool:
         """Build phylogenetic trees."""
+        self.emit.log("info", "=" * 60)
+        self.emit.log("info", "STARTING TREE BUILDING STEP")
+        self.emit.log("info", "=" * 60)
         self.emit.progress("trees", 70, "Building phylogenetic trees...")
         
         try:
             import pandas as pd
+            import glob
+            import subprocess
+            
+            # CLEAN OLD TREE FILES FIRST - before doing anything else
+            trees_dir = os.path.join(self.output_dir, 'trees')
+            os.makedirs(trees_dir, exist_ok=True)
+            
+            self.emit.log("info", f"Cleaning old tree files from {trees_dir}...")
+            old_trees = glob.glob(os.path.join(trees_dir, '*.png')) + glob.glob(os.path.join(trees_dir, '*.newick'))
+            removed_count = 0
+            for old_tree in old_trees:
+                try:
+                    os.remove(old_tree)
+                    removed_count += 1
+                except Exception as e:
+                    self.emit.log("warn", f"Could not remove old tree file {old_tree}: {e}")
+            
+            if removed_count > 0:
+                self.emit.log("info", f"Removed {removed_count} old tree file(s) from previous runs")
+            else:
+                self.emit.log("info", "No old tree files found to clean")
             
             germ_pass_path = os.path.join(self.output_dir, "ig_out_data_db-pass_clone-pass_germ-pass.tsv")
             
             if not os.path.exists(germ_pass_path):
                 self.emit.log("warn", "Germline pass file not found, skipping tree building")
+                # Send empty result to frontend so it knows there are no trees
+                self.emit.result("tree_images", data={
+                    "images": [],
+                    "tree_metadata": []
+                })
                 return True
             
             # Read clone data
@@ -448,22 +499,57 @@ class PipelineRunner:
             clonedf['clone_freq'] = clonedf.groupby('clone_id')['sequence_id'].transform('count')
             clonedf.sort_values('clone_freq', inplace=True, ascending=False)
             
-            # Get top clones for tree building
-            tempdf = clonedf.copy()
-            tempdf.drop_duplicates(subset="clone_id", keep='first', inplace=True)
-            tempdf = tempdf.head(20)
-            top_clones = tempdf['clone_id'].tolist()
+            # Get top clones for tree building (by clone size)
+            # First, identify clones by size and filter to only those with >= 3 sequences
+            clone_sizes = clonedf.groupby('clone_id').size().sort_values(ascending=False)
+            
+            # Filter to only clones with >= 3 sequences (required for tree building)
+            valid_clones = clone_sizes[clone_sizes >= 3]
+            
+            # Get top 20 clones that have >= 3 sequences
+            top_clones = valid_clones.head(20).index.tolist()
+            
+            if len(top_clones) == 0:
+                self.emit.log("warn", "No clones with >= 3 sequences found, skipping tree building")
+                # Still send empty result to frontend
+                self.emit.result("tree_images", data={
+                    "images": [],
+                    "tree_metadata": []
+                })
+                return True
+            
+            self.emit.log("info", f"Found {len(top_clones)} clones with >= 3 sequences (top {min(20, len(valid_clones))} selected)")
+            
+            # Write ALL sequences from these top clones to build-trees-input.tsv
+            tempdf = clonedf[clonedf['clone_id'].isin(top_clones)].copy()
+            
+            # Drop the clone_freq column if it exists (was only for sorting)
             if 'clone_freq' in tempdf.columns:
                 tempdf = tempdf.drop(columns=['clone_freq'])
             
             build_trees_input_path = os.path.join(self.output_dir, 'build-trees-input.tsv')
             tempdf.to_csv(build_trees_input_path, sep="\t", index=False)
             
+            # Verify the file was created and has data
+            if not os.path.exists(build_trees_input_path):
+                self.emit.log("error", f"Failed to create build-trees-input.tsv file!")
+                # Send empty result to frontend
+                self.emit.result("tree_images", data={
+                    "images": [],
+                    "tree_metadata": []
+                })
+                return True
+            
+            file_size = os.path.getsize(build_trees_input_path)
+            self.emit.log("info", f"Prepared {len(tempdf)} sequences from {len(top_clones)} clones for tree building")
+            self.emit.log("info", f"Created build-trees-input.tsv ({file_size} bytes) with clones: {top_clones[:10]}{'...' if len(top_clones) > 10 else ''}")
+            
             # Create sequence count mapping BEFORE BuildTrees collapses sequences
-            # Count how many times each unique sequence appears in each clone
+            # Count how many times each unique sequence appears WITHIN EACH CLONE
             # BuildTrees collapses identical sequences, so we need to count by sequence content
+            # CRITICAL: Store counts per clone to avoid cross-clone contamination
             from Bio import SeqIO
-            sequence_counts = {}
+            sequence_counts_by_clone = {}  # {clone_id: {seq_id: count}}
             combined_fasta = os.path.join(self.output_dir, 'combined.fasta')
             
             if os.path.exists(combined_fasta):
@@ -475,88 +561,158 @@ class PipelineRunner:
                     seq_content_map[str(record.id)] = seq_content
                 
                 # Count sequences by their actual DNA content (not just ID) per clone
+                # Store counts by SEQUENCE CONTENT, not by ID, because BuildTrees collapses identical sequences
                 for clone_id in top_clones:
                     clone_seqs = clonedf[clonedf['clone_id'] == clone_id]
                     # Group by sequence content to count duplicates within this clone
-                    content_to_ids = {}
+                    content_counts = {}
                     for _, row in clone_seqs.iterrows():
                         seq_id = str(row['sequence_id'])
                         if seq_id in seq_content_map:
                             seq_content = seq_content_map[seq_id]
-                            if seq_content not in content_to_ids:
-                                content_to_ids[seq_content] = []
-                            content_to_ids[seq_content].append(seq_id)
+                            if seq_content not in content_counts:
+                                content_counts[seq_content] = 0
+                            content_counts[seq_content] += 1
                     
-                    # For each unique sequence content in this clone, store the count
-                    # All sequence IDs with the same content get the same count
-                    for seq_content, seq_ids in content_to_ids.items():
-                        count = len(seq_ids)  # How many sequences have this content
-                        # Store count for all sequence IDs with this content
-                        for seq_id in seq_ids:
-                            # Use the original sequence_id (with ||| if present) as key
-                            sequence_counts[seq_id] = count
+                    # Store counts BY CONTENT for this clone
+                    # The R script will match sequences by content, not by ID
+                    sequence_counts_by_clone[str(clone_id)] = content_counts
             else:
                 # Fallback: count by sequence_id (won't catch duplicates with different IDs)
                 for clone_id in top_clones:
                     clone_seqs = clonedf[clonedf['clone_id'] == clone_id]
+                    sequence_counts_by_clone[str(clone_id)] = {}
                     for seq_id in clone_seqs['sequence_id']:
                         seq_id_str = str(seq_id)
-                        if seq_id_str not in sequence_counts:
-                            sequence_counts[seq_id_str] = 0
-                        sequence_counts[seq_id_str] += 1
+                        if seq_id_str not in sequence_counts_by_clone[str(clone_id)]:
+                            sequence_counts_by_clone[str(clone_id)][seq_id_str] = 1
             
             # Save sequence counts to a JSON file for R script to read
             import json
             sequence_counts_path = os.path.join(self.output_dir, 'sequence_counts.json')
             with open(sequence_counts_path, 'w') as f:
-                json.dump(sequence_counts, f)
+                json.dump(sequence_counts_by_clone, f)
             
             # Run BuildTrees (without IgPhyML)
             build_trees_dir = os.path.join(self.output_dir, 'build-trees-input')
             os.system(f"rm -rf {build_trees_dir}")
             
+            self.emit.log("info", f"Running BuildTrees.py on {build_trees_input_path}...")
             original_cwd = os.getcwd()
             try:
                 os.chdir(self.output_dir)
-                # Build trees with BuildTrees but skip IgPhyML (we'll build trees ourselves)
-                os.system(f"BuildTrees.py -d build-trees-input.tsv --collapse --clean all 2>/dev/null || true")
+                # Build trees with BuildTrees (removed --collapse to keep more unique sequences)
+                # --clean all: only remove sequences with ambiguous nucleotides
+                # This preserves more phylogenetic information for lineage reconstruction
+                # Log to file for debugging
+                debug_log = os.path.join(self.output_dir, 'tree_building_debug.log')
+                with open(debug_log, 'w') as f:
+                    f.write(f"Running BuildTrees.py at {os.getcwd()}\n")
+                    f.write(f"Command: BuildTrees.py -d build-trees-input.tsv --clean all\n\n")
+                
+                build_trees_result = subprocess.run(
+                    ['BuildTrees.py', '-d', 'build-trees-input.tsv', '--clean', 'all'],
+                    capture_output=True,
+                    text=True,
+                    timeout=600
+                )
+                
+                # Append results to debug log
+                with open(debug_log, 'a') as f:
+                    f.write(f"Return code: {build_trees_result.returncode}\n\n")
+                    f.write(f"STDOUT:\n{build_trees_result.stdout}\n\n")
+                    f.write(f"STDERR:\n{build_trees_result.stderr}\n")
+                
+                if build_trees_result.returncode != 0:
+                    self.emit.log("error", f"BuildTrees.py failed! See {debug_log} for details")
+                    self.emit.log("error", f"BuildTrees stderr: {build_trees_result.stderr[:500] if build_trees_result.stderr else 'no stderr'}")
+                else:
+                    self.emit.log("info", f"BuildTrees.py completed successfully (log: {debug_log})")
+                
+                # Check if FASTA files were created
+                if os.path.exists(build_trees_dir):
+                    fasta_count = len(glob.glob(os.path.join(build_trees_dir, '*.fasta')))
+                    self.emit.log("info", f"BuildTrees created {fasta_count} FASTA file(s) in {build_trees_dir}")
+                else:
+                    self.emit.log("warn", f"BuildTrees directory {build_trees_dir} was not created!")
+                    
             finally:
                 os.chdir(original_cwd)
             
-            # Build trees using R's ape package (works with any number of sequences >= 3)
-            # This is simpler and more reliable than RAxML for small clones
-            import subprocess
+            # Build trees using IQ-TREE2 (Maximum Likelihood) with fallback to Neighbor-Joining
+            # IQ-TREE2 provides better phylogenetic inference than NJ, closer to IgPhyML quality
+            # Automatically falls back to NJ if IQ-TREE2 is not installed
+            # (subprocess already imported at top of try block)
             
-            trees_dir = os.path.join(self.output_dir, 'trees')
-            os.makedirs(trees_dir, exist_ok=True)
+            # trees_dir already created and cleaned above
             
-            # Create an R script to build trees
-            build_trees_r = os.path.join(backend_dir, 'scripts', 'build-trees-ape.R')
+            # Use the new IQ-TREE2 script (with automatic NJ fallback)
+            build_trees_r = os.path.join(backend_dir, 'scripts', 'build-trees-iqtree.R')
+            
+            # Estimate time: ~20-40 minutes for 20 trees, more with many clones
+            # With parallel processing: ~5-10 minutes on 8-core system
+            self.emit.log("info", "Building phylogenetic trees... This may take 10-30 minutes for large datasets")
+            self.emit.log("info", "Tree building is parallelized across CPU cores for faster processing")
+            
+            # Set up R environment explicitly to avoid "cannot find system Renviron" error
+            r_env = os.environ.copy()
+            r_env['R_HOME'] = '/Library/Frameworks/R.framework/Resources'
+            r_env['R_SHARE_DIR'] = '/Library/Frameworks/R.framework/Resources/share'
+            r_env['R_INCLUDE_DIR'] = '/Library/Frameworks/R.framework/Resources/include'
+            r_env['R_DOC_DIR'] = '/Library/Frameworks/R.framework/Resources/doc'
+            # Set editor to avoid "invalid value for 'editor'" error
+            r_env['EDITOR'] = '/usr/bin/nano'
+            # Try to use the direct R binary path to bypass wrapper issues
+            r_cmd = '/Library/Frameworks/R.framework/Versions/4.5-arm64/Resources/bin/Rscript'
             
             result = subprocess.run(
-                ['Rscript', build_trees_r, self.output_dir],
+                [r_cmd, build_trees_r, self.output_dir],
                 capture_output=True,
                 text=True,
-                timeout=300
+                timeout=3600,  # Increased to 60 minutes (was 300 seconds = 5 min)
+                env=r_env
             )
             
             if result.returncode != 0:
-                self.emit.log("warn", f"Tree building failed: {result.stderr[:300] if result.stderr else 'no error'}")
+                self.emit.log("error", f"Tree building R script failed with return code {result.returncode}")
+                self.emit.log("error", f"R script stderr: {result.stderr[:500] if result.stderr else 'no stderr'}")
+                self.emit.log("error", f"R script stdout: {result.stdout[:500] if result.stdout else 'no stdout'}")
+                # Send empty result to frontend
+                self.emit.result("tree_images", data={
+                    "images": [],
+                    "tree_metadata": []
+                })
                 return True  # Non-fatal
             
-            # Count generated trees
-            import glob
+            # Count generated trees (only from this run)
             tree_files = glob.glob(os.path.join(trees_dir, '*.newick'))
+            self.emit.log("info", f"Tree building complete. Found {len(tree_files)} Newick file(s) in {trees_dir}")
             
-            self.emit.log("info", f"Built {len(tree_files)} phylogenetic trees")
+            if len(tree_files) == 0:
+                self.emit.log("warn", f"No tree files generated! Check R script output above.")
+                self.emit.log("info", f"R script stdout: {result.stdout[:1000] if result.stdout else 'no stdout'}")
+            elif len(tree_files) > len(top_clones):
+                self.emit.log("warn", f"Generated {len(tree_files)} trees but expected max {len(top_clones)}. Some clones may have been split or had multiple trees.")
+            elif len(tree_files) < len(top_clones):
+                self.emit.log("info", f"Generated {len(tree_files)} trees from {len(top_clones)} clones (some clones may have been skipped due to < 3 sequences after cleaning)")
+            else:
+                self.emit.log("info", f"Successfully built {len(tree_files)} phylogenetic trees for {len(top_clones)} clones")
             return True
             
         except Exception as e:
             self.emit.log("warn", f"Tree building failed (non-fatal): {str(e)}")
+            # Send empty result to frontend so it knows there are no trees
+            self.emit.result("tree_images", data={
+                "images": [],
+                "tree_metadata": []
+            })
             return True  # Non-fatal
     
     def visualize_trees(self) -> bool:
         """Generate tree visualizations."""
+        self.emit.log("info", "=" * 60)
+        self.emit.log("info", "STARTING TREE VISUALIZATION STEP")
+        self.emit.log("info", "=" * 60)
         self.emit.progress("visualize", 85, "Generating tree visualizations...")
         
         try:
@@ -567,21 +723,126 @@ class PipelineRunner:
             
             visualize_script = os.path.join(backend_dir, 'scripts', 'visualize-tree.R')
             
+            self.emit.log("info", f"Running tree visualization script: {visualize_script}")
+            self.emit.log("info", f"Output directory: {self.output_dir}")
+            
+            # Set up R environment explicitly
+            r_env = os.environ.copy()
+            r_env['R_HOME'] = '/Library/Frameworks/R.framework/Resources'
+            r_env['R_SHARE_DIR'] = '/Library/Frameworks/R.framework/Resources/share'
+            r_env['R_INCLUDE_DIR'] = '/Library/Frameworks/R.framework/Resources/include'
+            r_env['R_DOC_DIR'] = '/Library/Frameworks/R.framework/Resources/doc'
+            r_env['EDITOR'] = '/usr/bin/nano'
+            r_cmd = '/Library/Frameworks/R.framework/Versions/4.5-arm64/Resources/bin/Rscript'
+            
             result = subprocess.run(
-                ['Rscript', visualize_script, self.output_dir],
+                [r_cmd, visualize_script, self.output_dir],
                 capture_output=True,
                 text=True,
-                timeout=300
+                timeout=300,
+                env=r_env
             )
             
             if result.returncode != 0:
-                self.emit.log("warn", f"Tree visualization returned non-zero: {result.stderr[:200] if result.stderr else 'no stderr'}")
+                self.emit.log("error", f"Tree visualization failed with return code {result.returncode}")
+                self.emit.log("error", f"R script stderr: {result.stderr[:500] if result.stderr else 'no stderr'}")
+                self.emit.log("error", f"R script stdout: {result.stdout[:500] if result.stdout else 'no stdout'}")
+            else:
+                self.emit.log("info", f"Tree visualization script completed successfully")
+                if result.stdout:
+                    self.emit.log("info", f"Visualization output: {result.stdout[:200]}")
             
-            # List generated tree images
-            tree_images = glob.glob(os.path.join(trees_dir, '*.png'))
+            # List generated tree images and sort by clone size (largest first)
+            # Only include trees that have both PNG and Newick files (ensures they're complete and from current run)
+            all_tree_images = glob.glob(os.path.join(trees_dir, '*.png'))
+            all_tree_newicks = {os.path.basename(f).replace('.newick', '') for f in glob.glob(os.path.join(trees_dir, '*.newick'))}
+            
+            # Filter to only include PNGs that have corresponding Newick files
+            tree_images = [
+                img for img in all_tree_images
+                if os.path.basename(img).replace('.png', '') in all_tree_newicks
+            ]
+            
+            if len(all_tree_images) > len(tree_images):
+                self.emit.log("warn", f"Found {len(all_tree_images)} PNG files but only {len(tree_images)} have corresponding Newick files. Filtering incomplete trees.")
+            
+            self.emit.log("info", f"Found {len(tree_images)} complete tree(s) (PNG + Newick)")
+            
             if tree_images:
-                self.emit.result("tree_images", data={"images": tree_images})
-                self.emit.log("info", f"Generated {len(tree_images)} tree visualization(s)")
+                # Load clone sizes for sorting
+                try:
+                    import pandas as pd
+                    clone_pass_path = os.path.join(self.output_dir, 'ig_out_data_db-pass_clone-pass_germ-pass.tsv')
+                    
+                    if os.path.exists(clone_pass_path):
+                        clone_df = pd.read_table(clone_pass_path)
+                        
+                        # Calculate clone sizes
+                        clone_sizes = {}
+                        for clone_id in clone_df['clone_id'].unique():
+                            if pd.notna(clone_id):
+                                clone_sizes[int(clone_id)] = len(clone_df[clone_df['clone_id'] == clone_id])
+                        
+                        # Sort tree images by clone size (extract clone ID from filename)
+                        def get_clone_size(tree_path):
+                            # Extract clone ID from filename like "tree_192.png" -> 192
+                            basename = os.path.basename(tree_path)
+                            match = basename.replace('tree_', '').replace('.png', '')
+                            try:
+                                clone_id = int(match)
+                                return clone_sizes.get(clone_id, 0)
+                            except:
+                                return 0
+                        
+                        # Sort by clone size descending (largest first)
+                        tree_images.sort(key=get_clone_size, reverse=True)
+                        
+                        self.emit.log("info", f"Sorted {len(tree_images)} trees by clone size (largest first)")
+                    else:
+                        # Fallback: sort alphabetically
+                        tree_images.sort()
+                        self.emit.log("info", f"Generated {len(tree_images)} tree visualization(s)")
+                        
+                except Exception as e:
+                    # Fallback: sort alphabetically
+                    tree_images.sort()
+                    self.emit.log("warn", f"Could not sort trees by clone size: {str(e)}")
+                
+                # Send tree images with clone size metadata for better display
+                # Use absolute paths to avoid path resolution issues
+                tree_data = []
+                for tree_path in tree_images:
+                    # Normalize to absolute path
+                    abs_tree_path = os.path.abspath(tree_path)
+                    basename = os.path.basename(abs_tree_path)
+                    match = basename.replace('tree_', '').replace('.png', '')
+                    try:
+                        clone_id = int(match)
+                        clone_size = clone_sizes.get(clone_id, 0) if 'clone_sizes' in locals() else 0
+                        tree_data.append({
+                            'path': abs_tree_path,
+                            'clone_id': clone_id,
+                            'clone_size': clone_size
+                        })
+                    except:
+                        tree_data.append({
+                            'path': abs_tree_path,
+                            'clone_id': None,
+                            'clone_size': 0
+                        })
+                
+                self.emit.result("tree_images", data={
+                    "images": tree_images,
+                    "tree_metadata": tree_data
+                })
+                self.emit.log("info", f"Sent {len(tree_images)} tree(s) to frontend")
+            else:
+                # Always send result, even if empty, so frontend knows there are no trees
+                self.emit.log("warn", "No tree images found - sending empty list to frontend")
+                self.emit.result("tree_images", data={
+                    "images": [],
+                    "tree_metadata": []
+                })
             
             return True
             
@@ -927,6 +1188,8 @@ class PipelineRunner:
     def run(self) -> bool:
         """Execute the full analysis pipeline."""
         try:
+            self.emit.log("info", "🚀 PIPELINE STARTING - Check logs for tree building messages")
+            
             # Step 1: Load FASTA files
             if not self.load_fasta_files():
                 self.emit.complete(False, "Failed to load FASTA files")
@@ -981,10 +1244,14 @@ class PipelineRunner:
                 return False
             
             # Step 9: Build trees
-            self.build_trees()
+            self.emit.log("info", "About to call build_trees()...")
+            if not self.build_trees():
+                self.emit.log("warn", "build_trees() returned False - continuing anyway")
             
             # Step 10: Visualize trees
-            self.visualize_trees()
+            self.emit.log("info", "About to call visualize_trees()...")
+            if not self.visualize_trees():
+                self.emit.log("warn", "visualize_trees() returned False - continuing anyway")
             
             # Step 11: Load and emit results
             if not self.load_results():

@@ -19,7 +19,9 @@
     "package:win": "npm run build && electron-builder --win"
   },
   "dependencies": {
-    "electron-store": "^8.1.0"
+    "d3": "^7.9.0",
+    "electron-store": "^8.1.0",
+    "phylotree": "^2.2.1"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^3.0.0",

@@ -24,7 +24,9 @@
         database_type: $wizardState.databaseType,
         database_v: $wizardState.customDatabaseV || undefined,
         database_d: $wizardState.customDatabaseD || undefined,
-        database_j: $wizardState.customDatabaseJ || undefined
+        database_j: $wizardState.customDatabaseJ || undefined,
+        clone_mode: $wizardState.cloneMode,
+        linkage_method: $wizardState.linkageMethod
       });
     } catch (error: any) {
       analysisState.update(s => ({
@@ -135,6 +137,59 @@
           <button class="edit-btn" on:click={() => wizardState.update(s => ({...s, step: 2}))}>
             Edit
           </button>
+        </div>
+        
+        <!-- Clone Definition Settings Section -->
+        <div class="summary-section">
+          <div class="section-icon">
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+              <circle cx="6" cy="6" r="2" stroke="currentColor" stroke-width="1.5"/>
+              <circle cx="14" cy="6" r="2" stroke="currentColor" stroke-width="1.5"/>
+              <circle cx="6" cy="14" r="2" stroke="currentColor" stroke-width="1.5"/>
+              <circle cx="14" cy="14" r="2" stroke="currentColor" stroke-width="1.5"/>
+              <path d="M8 6h4M8 14h4M6 8v4M14 8v4" stroke="currentColor" stroke-width="1.5"/>
+            </svg>
+          </div>
+          <div class="section-content">
+            <h3 class="section-title">Clone Definition Settings</h3>
+            <div class="section-details">
+              <div class="detail-row">
+                <span class="detail-label">V/J Mode</span>
+                <div class="setting-control">
+                  <select 
+                    class="select-sm" 
+                    bind:value={$wizardState.cloneMode}
+                  >
+                    <option value="allele">Allele (Strict - Recommended)</option>
+                    <option value="gene">Gene (Permissive)</option>
+                  </select>
+                </div>
+              </div>
+              <div class="detail-row">
+                <span class="detail-label">Linkage</span>
+                <div class="setting-control">
+                  <select 
+                    class="select-sm" 
+                    bind:value={$wizardState.linkageMethod}
+                  >
+                    <option value="complete">Complete (Strictest)</option>
+                    <option value="average">Average (Recommended)</option>
+                    <option value="single">Single (Permissive)</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+            <div class="settings-help">
+              <p class="help-text">
+                <strong>V/J Mode:</strong> 'Allele' requires exact allele matches (e.g., IGKV3-20*01). 
+                'Gene' groups all alleles of a gene (e.g., IGKV3-20*01, *02, *03).
+              </p>
+              <p class="help-text">
+                <strong>Linkage:</strong> Determines how sequences are clustered. 
+                'Average' balances sensitivity and specificity (recommended for most analyses).
+              </p>
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -454,6 +509,54 @@
   
   .start-btn svg {
     margin-right: var(--space-3);
+  }
+  
+  .setting-control {
+    flex: 1;
+  }
+  
+  .select-sm {
+    width: 100%;
+    padding: var(--space-1) var(--space-2);
+    background: var(--surface-base);
+    border: 1px solid var(--border-default);
+    border-radius: var(--border-radius-sm);
+    font-size: var(--text-xs);
+    color: var(--text-primary);
+    cursor: pointer;
+    transition: border-color var(--transition-fast);
+  }
+  
+  .select-sm:hover {
+    border-color: var(--color-primary);
+  }
+  
+  .select-sm:focus {
+    outline: none;
+    border-color: var(--color-primary);
+    box-shadow: 0 0 0 3px var(--color-primary-light);
+  }
+  
+  .settings-help {
+    margin-top: var(--space-3);
+    padding-top: var(--space-3);
+    border-top: 1px solid var(--border-light);
+  }
+  
+  .help-text {
+    font-size: var(--text-xs);
+    color: var(--text-tertiary);
+    line-height: var(--leading-relaxed);
+    margin: 0 0 var(--space-2) 0;
+  }
+  
+  .help-text:last-child {
+    margin-bottom: 0;
+  }
+  
+  .help-text strong {
+    color: var(--text-secondary);
+    font-weight: var(--font-medium);
   }
 </style>
 

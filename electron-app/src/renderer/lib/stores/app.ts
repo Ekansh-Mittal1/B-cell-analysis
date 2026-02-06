@@ -23,6 +23,8 @@ export interface WizardState {
   customDatabaseV: string | null;
   customDatabaseD: string | null;
   customDatabaseJ: string | null;
+  cloneMode: 'allele' | 'gene';  // V/J gene matching: allele (strict) or gene (permissive)
+  linkageMethod: 'single' | 'average' | 'complete';  // Clustering linkage method
 }
 
 export interface AnalysisProgress {
@@ -159,7 +161,9 @@ export const wizardState: Writable<WizardState> = writable({
   databaseType: 'IMGT',
   customDatabaseV: null,
   customDatabaseD: null,
-  customDatabaseJ: null
+  customDatabaseJ: null,
+  cloneMode: 'allele',  // Default: strict allele matching
+  linkageMethod: 'average'  // Default: average linkage
 });
 
 // Analysis state
@@ -335,7 +339,9 @@ export function resetWizard(): void {
     databaseType: 'IMGT',
     customDatabaseV: null,
     customDatabaseD: null,
-    customDatabaseJ: null
+    customDatabaseJ: null,
+    cloneMode: 'allele',
+    linkageMethod: 'average'
   });
 }
 

@@ -130,6 +130,10 @@ class PipelineRunner:
         self.output_dir = config.get('output_dir', '')
         self.backend_dir = config.get('backend_dir', backend_dir)
         
+        # Clone definition settings
+        self.clone_mode = config.get('clone_mode', 'allele')  # 'allele' or 'gene'
+        self.linkage_method = config.get('linkage_method', 'average')  # 'single', 'average', or 'complete'
+        
         # Set up paths
         self.bin_dir = os.path.join(self.backend_dir, '..', 'geneGUI', 'bin')
         self.data_dir = os.path.join(self.backend_dir, '..', 'geneGUI', 'data')
@@ -430,8 +434,9 @@ class PipelineRunner:
                 db_pass_path = os.path.join(self.output_dir, "ig_out_data_db-pass.tsv")
                 clone_pass_path = os.path.join(self.output_dir, "ig_out_data_db-pass_clone-pass.tsv")
                 
-                # Define clones
-                define_clonality(db_pass_path, str(threshold))
+                # Define clones with configurable mode and linkage
+                self.emit.log("info", f"Clone definition settings: mode={self.clone_mode}, linkage={self.linkage_method}, threshold={threshold}")
+                define_clonality(db_pass_path, str(threshold), mode=self.clone_mode, link=self.linkage_method)
                 self.emit.log("info", "Clone definition complete")
                 
                 # Create germlines

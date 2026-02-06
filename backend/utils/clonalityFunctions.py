@@ -25,7 +25,7 @@ def make_db(i, rj, rv, rd, s):
     finally:
         os.chdir(original_cwd)
     
-def define_clonality(db, dist, act='set', model='ham', norm='len'):
+def define_clonality(db, dist, act='set', model='ham', norm='len', mode='allele', link='average'):
     # DefineClones.py creates output in current directory, so change to outs_dir
     original_cwd = os.getcwd()
     try:
@@ -33,10 +33,18 @@ def define_clonality(db, dist, act='set', model='ham', norm='len'):
         # Use relative path from outs_dir
         db_rel = os.path.relpath(db, outs_dir) if os.path.isabs(db) else db
         #nproc
-        cmd = ['DefineClones.py', '-d', db_rel, '--act', act, '--model', model, '--norm', norm, '--dist', dist]
-        command = subprocess.Popen(cmd, stdout=subprocess.PIPE, shell=False)
-        output = command.communicate()[0]
-        print(output)
+        cmd = ['DefineClones.py', '-d', db_rel, '--act', act, '--model', model, '--norm', norm, '--dist', dist, '--mode', mode, '--link', link]
+        
+        # Debug: Print the exact command being run
+        print(f"[DEBUG] Running DefineClones.py with command: {' '.join(cmd)}")
+        
+        command = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False)
+        output, errors = command.communicate()
+        
+        if errors:
+            print(f"[DEBUG] DefineClones.py stderr: {errors.decode('utf-8', errors='ignore')}")
+        if output:
+            print(f"[DEBUG] DefineClones.py stdout: {output.decode('utf-8', errors='ignore')}")
     finally:
         os.chdir(original_cwd)
 

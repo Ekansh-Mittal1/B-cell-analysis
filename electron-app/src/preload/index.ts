@@ -42,6 +42,8 @@ interface PipelineConfig {
   database_d?: string;
   database_j?: string;
   output_dir?: string;
+  clone_mode?: 'allele' | 'gene';
+  linkage_method?: 'single' | 'average' | 'complete';
 }
 
 // Expose API to renderer

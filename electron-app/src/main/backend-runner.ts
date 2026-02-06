@@ -23,6 +23,8 @@ interface PipelineConfig {
   database_d?: string;
   database_j?: string;
   output_dir?: string;
+  clone_mode?: 'allele' | 'gene';  // V/J gene matching: allele (strict) or gene (permissive)
+  linkage_method?: 'single' | 'average' | 'complete';  // Clustering linkage method
 }
 
 interface RunCallbacks {

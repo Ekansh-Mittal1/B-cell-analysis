@@ -11,6 +11,12 @@
   async function handleStartAnalysis() {
     if (!window.electronAPI) return;
     
+    // Validate COVID matching configuration
+    if ($wizardState.runCovidMatching && !$wizardState.covAbdabPath) {
+      alert('Please select a CoV-AbDab database file to enable COVID matching.');
+      return;
+    }
+    
     resetAnalysis();
     analysisState.update(s => ({
       ...s,
@@ -26,7 +32,9 @@
         database_d: $wizardState.customDatabaseD || undefined,
         database_j: $wizardState.customDatabaseJ || undefined,
         clone_mode: $wizardState.cloneMode,
-        linkage_method: $wizardState.linkageMethod
+        linkage_method: $wizardState.linkageMethod,
+        run_covid_matching: $wizardState.runCovidMatching,
+        cov_abdab_database_path: $wizardState.covAbdabPath || undefined
       });
     } catch (error: any) {
       analysisState.update(s => ({
@@ -34,6 +42,28 @@
         isRunning: false,
         error: error.message || 'An unexpected error occurred'
       }));
+    }
+  }
+  
+  async function selectCovidDatabase() {
+    if (!window.electronAPI) return;
+    
+    try {
+      const result = await window.electronAPI.selectFile({
+        filters: [
+          { name: 'CSV Files', extensions: ['csv'] },
+          { name: 'All Files', extensions: ['*'] }
+        ]
+      });
+      
+      if (result) {
+        wizardState.update(s => ({
+          ...s,
+          covAbdabPath: result
+        }));
+      }
+    } catch (error: any) {
+      console.error('Error selecting COVID database:', error);
     }
   }
   
@@ -188,6 +218,60 @@
                 <strong>Linkage:</strong> Determines how sequences are clustered. 
                 'Average' balances sensitivity and specificity (recommended for most analyses).
               </p>
+            </div>
+          </div>
+        </div>
+
+        <!-- COVID Database Matching Section -->
+        <div class="summary-section">
+          <div class="section-icon">
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+              <path d="M3 3v14M17 3v14M7 5l6 2.5-6 2.5 6 2.5-6 2.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </div>
+          <div class="section-content">
+            <h3 class="section-title">COVID-19 Database Matching (Optional)</h3>
+            <div class="section-details">
+              <div class="detail-row">
+                <label class="checkbox-label">
+                  <input 
+                    type="checkbox" 
+                    bind:checked={$wizardState.runCovidMatching}
+                  />
+                  <span>Compare top clones against CoV-AbDab database</span>
+                </label>
+              </div>
+              
+              {#if $wizardState.runCovidMatching}
+                <div class="detail-row file-input-row">
+                  <span class="detail-label">Database File</span>
+                  <div class="file-input-group">
+                    {#if $wizardState.covAbdabPath}
+                      <span class="file-selected">{getFileName($wizardState.covAbdabPath)}</span>
+                    {:else}
+                      <span class="file-placeholder">No file selected</span>
+                    {/if}
+                    <button 
+                      class="btn-file-select"
+                      on:click={selectCovidDatabase}
+                    >
+                      Browse...
+                    </button>
+                  </div>
+                </div>
+              {/if}
+            </div>
+            <div class="settings-help">
+              <p class="help-text">
+                Matches your largest 20 clones against <strong>12,918 known COVID-19 antibodies</strong> from the 
+                <a href="http://opig.stats.ox.ac.uk/webapps/covabdab/" target="_blank" rel="noopener noreferrer">CoV-AbDab database</a>.
+                Compares both full VH sequences and CDR3 regions.
+              </p>
+              {#if $wizardState.runCovidMatching && !$wizardState.covAbdabPath}
+                <p class="help-text warning">
+                  <strong>⚠ Please select a CoV-AbDab CSV file to enable matching.</strong>
+                </p>
+              {/if}
             </div>
           </div>
         </div>
@@ -557,6 +641,95 @@
   .help-text strong {
     color: var(--text-secondary);
     font-weight: var(--font-medium);
+  }
+  
+  .help-text.warning {
+    color: var(--warning-text, #d97706);
+    background: var(--warning-bg, #fef3c7);
+    padding: var(--space-2);
+    border-radius: var(--border-radius-sm);
+    border-left: 3px solid var(--warning-border, #f59e0b);
+  }
+  
+  .help-text a {
+    color: var(--color-primary);
+    text-decoration: underline;
+  }
+  
+  .help-text a:hover {
+    color: var(--color-primary-dark);
+  }
+  
+  .checkbox-label {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    cursor: pointer;
+    font-size: var(--text-sm);
+    color: var(--text-primary);
+  }
+  
+  .checkbox-label input[type="checkbox"] {
+    width: 18px;
+    height: 18px;
+    cursor: pointer;
+  }
+  
+  .file-input-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  
+  .file-input-group {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin-top: var(--space-2);
+  }
+  
+  .file-selected {
+    flex: 1;
+    padding: var(--space-2) var(--space-3);
+    background: var(--surface-base);
+    border: 1px solid var(--border-default);
+    border-radius: var(--border-radius-sm);
+    font-size: var(--text-xs);
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  
+  .file-placeholder {
+    flex: 1;
+    padding: var(--space-2) var(--space-3);
+    background: var(--surface-base);
+    border: 1px dashed var(--border-default);
+    border-radius: var(--border-radius-sm);
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+    font-style: italic;
+  }
+  
+  .btn-file-select {
+    padding: var(--space-2) var(--space-3);
+    background: var(--surface-raised);
+    border: 1px solid var(--border-default);
+    border-radius: var(--border-radius-sm);
+    font-size: var(--text-xs);
+    color: var(--text-primary);
+    cursor: pointer;
+    transition: all var(--transition-fast);
+    white-space: nowrap;
+  }
+  
+  .btn-file-select:hover {
+    background: var(--surface-hover);
+    border-color: var(--color-primary);
+  }
+  
+  .btn-file-select:active {
+    transform: translateY(1px);
   }
 </style>
 

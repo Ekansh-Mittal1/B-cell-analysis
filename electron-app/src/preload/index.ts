@@ -44,6 +44,8 @@ interface PipelineConfig {
   output_dir?: string;
   clone_mode?: 'allele' | 'gene';
   linkage_method?: 'single' | 'average' | 'complete';
+  run_covid_matching?: boolean;
+  cov_abdab_database_path?: string;
 }
 
 // Expose API to renderer

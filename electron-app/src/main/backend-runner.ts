@@ -25,6 +25,8 @@ interface PipelineConfig {
   output_dir?: string;
   clone_mode?: 'allele' | 'gene';  // V/J gene matching: allele (strict) or gene (permissive)
   linkage_method?: 'single' | 'average' | 'complete';  // Clustering linkage method
+  run_covid_matching?: boolean;  // Enable COVID database matching
+  cov_abdab_database_path?: string;  // Path to CoV-AbDab CSV file
 }
 
 interface RunCallbacks {

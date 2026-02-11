@@ -182,6 +182,33 @@
         {/if}
       </div>
     </div>
+    
+    <!-- Full Sequences Card -->
+    <div class="card">
+      <div class="card-header">
+        <h3 class="card-title">Full Sequences</h3>
+      </div>
+      <div class="card-body">
+        <div class="sequence-debug">
+          <div class="seq-row">
+            <span class="seq-label">DNA Sequence:</span>
+            <code class="seq-display dna">{sequence.dna_sequence || 'Not available'}</code>
+          </div>
+          <div class="seq-row">
+            <span class="seq-label">DNA Length:</span>
+            <span class="seq-value">{sequence.dna_sequence?.length || 0} nt</span>
+          </div>
+          <div class="seq-row">
+            <span class="seq-label">AA Sequence (V-J):</span>
+            <code class="seq-display aa">{sequence.aa_sequence || 'Not available'}</code>
+          </div>
+          <div class="seq-row">
+            <span class="seq-label">AA Length:</span>
+            <span class="seq-value">{sequence.aa_sequence?.length || 0} AA</span>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -563,6 +590,51 @@
     color: var(--text-muted);
     font-size: var(--text-sm);
     font-style: italic;
+  }
+  
+  /* Debug Sequences */
+  .sequence-debug {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+  }
+  
+  .seq-row {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+  
+  .seq-label {
+    font-size: var(--text-xs);
+    color: var(--text-tertiary);
+    font-weight: var(--font-medium);
+  }
+  
+  .seq-display {
+    font-family: 'SF Mono', Monaco, monospace;
+    font-size: 11px;
+    padding: var(--space-2);
+    background: var(--surface-base);
+    border: 1px solid var(--border-light);
+    border-radius: var(--border-radius-sm);
+    word-break: break-all;
+    overflow-wrap: break-word;
+    max-height: 100px;
+    overflow-y: auto;
+  }
+  
+  .seq-display.dna {
+    color: #3b82f6;
+  }
+  
+  .seq-display.aa {
+    color: #10b981;
+  }
+  
+  .seq-value {
+    font-size: var(--text-sm);
+    color: var(--text-secondary);
   }
 </style>
 

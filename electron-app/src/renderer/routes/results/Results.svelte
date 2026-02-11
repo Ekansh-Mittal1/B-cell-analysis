@@ -5,8 +5,9 @@
   import DlSequenceBrowser from './DlSequenceBrowser.svelte';
   import PhylogeneticTrees from './PhylogeneticTrees.svelte';
   import PublicClones from './PublicClones.svelte';
+  import CovidMatching from './CovidMatching.svelte';
   
-  type Tab = 'browser' | 'dl-browser' | 'trees' | 'public-clones';
+  type Tab = 'browser' | 'dl-browser' | 'trees' | 'public-clones' | 'covid-matching';
   let activeTab: Tab = 'browser';
   let isExporting = false;
 
@@ -220,6 +221,22 @@
           </span>
         {/if}
       </button>
+      
+      <button 
+        class="tab" 
+        class:active={activeTab === 'covid-matching'}
+        on:click={() => activeTab = 'covid-matching'}
+      >
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+          <path d="M2 2v12M14 2v12M6 4l4 2-4 2 4 2-4 2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        COVID-DB Matching
+        {#if $resultsState.covidMatchData}
+          <span class="tab-badge">
+            {$resultsState.covidMatchData.stats.clones_with_high_matches}
+          </span>
+        {/if}
+      </button>
       </div>
     </div>
   </div>
@@ -279,6 +296,8 @@
       <PhylogeneticTrees />
     {:else if activeTab === 'public-clones'}
       <PublicClones />
+    {:else if activeTab === 'covid-matching'}
+      <CovidMatching />
     {/if}
   </div>
 </div>

@@ -25,6 +25,8 @@ export interface WizardState {
   customDatabaseJ: string | null;
   cloneMode: 'allele' | 'gene';  // V/J gene matching: allele (strict) or gene (permissive)
   linkageMethod: 'single' | 'average' | 'complete';  // Clustering linkage method
+  runCovidMatching: boolean;  // Enable COVID database matching
+  covAbdabPath: string | null;  // Path to CoV-AbDab CSV file
 }
 
 export interface AnalysisProgress {
@@ -56,11 +58,14 @@ export interface SequenceData {
   clone_id?: number;
   clone_count?: number;
   productive?: boolean;
+  dna_sequence?: string | null;  // Full DNA sequence for debugging
+  aa_sequence?: string | null;   // Translated AA sequence (V-J region) for debugging
 }
 
 export interface FileGroup {
   filename: string;
   sequences: SequenceData[];
+  cloneGroups: CloneGroup[];
   expanded: boolean;
 }
 
@@ -99,6 +104,55 @@ export interface VisualizationData {
   };
 }
 
+export interface CovidMatchAlignment {
+  query_aligned: string;
+  reference_aligned: string;
+  match_string: string;
+  identity: number;
+  matches: number;
+  length: number;
+}
+
+export interface CovidMatchResult {
+  antibody_name: string;
+  identity: number;
+  alignment: CovidMatchAlignment;
+  db_info: {
+    binds_to: string;
+    neutralizes: string;
+    v_gene: string;
+    j_gene: string;
+    origin: string;
+    ab_or_nb: string;
+  };
+}
+
+export interface CovidCloneData {
+  clone_id: number;
+  size: number;
+  cdr3_aa: string;  // IMGT CDR3 format (trimmed)
+  cdr3_aa_raw: string;  // Original AIRR Junction format
+  vh_aa: string;  // Translated from DNA
+  v_gene: string;
+  j_gene: string;
+  files: string[];
+  vh_matches: CovidMatchResult[];
+  cdr3_matches: CovidMatchResult[];
+  has_high_vh_match: boolean;
+  has_high_cdr3_match: boolean;
+}
+
+export interface CovidMatchData {
+  top_clones: CovidCloneData[];
+  stats: {
+    total_clones_analyzed: number;
+    clones_with_vh_matches: number;
+    clones_with_cdr3_matches: number;
+    clones_with_high_matches: number;
+    database_size: number;
+  };
+}
+
 export interface PublicClonesData {
   public_clones: PublicCloneResult[];
   top_x: PublicCloneResult[];
@@ -133,6 +187,8 @@ export interface ResultsState {
   outputDir: string | null;
   publicClonesData: PublicClonesData | null;
   isAnalyzingPublicClones: boolean;
+  covidMatchData: CovidMatchData | null;
+  isAnalyzingCovidMatching: boolean;
 }
 
 export interface AnalysisState {
@@ -163,7 +219,9 @@ export const wizardState: Writable<WizardState> = writable({
   customDatabaseD: null,
   customDatabaseJ: null,
   cloneMode: 'allele',  // Default: strict allele matching
-  linkageMethod: 'average'  // Default: average linkage
+  linkageMethod: 'average',  // Default: average linkage
+  runCovidMatching: false,
+  covAbdabPath: null
 });
 
 // Analysis state
@@ -187,7 +245,9 @@ export const resultsState: Writable<ResultsState> = writable({
   treeMetadata: [],
   outputDir: null,
   publicClonesData: null,
-  isAnalyzingPublicClones: false
+  isAnalyzingPublicClones: false,
+  covidMatchData: null,
+  isAnalyzingCovidMatching: false
 });
 
 
@@ -341,7 +401,9 @@ export function resetWizard(): void {
     customDatabaseD: null,
     customDatabaseJ: null,
     cloneMode: 'allele',
-    linkageMethod: 'average'
+    linkageMethod: 'average',
+    runCovidMatching: false,
+    covAbdabPath: null
   });
 }
 
@@ -369,10 +431,75 @@ export function setProgress(progress: AnalysisProgress): void {
   }));
 }
 
+// Helper function to group sequences by clone within a file
+function groupSequencesByClone(sequences: SequenceData[]): CloneGroup[] {
+  const cloneMap = new Map<number | null, SequenceData[]>();
+  
+  for (const seq of sequences) {
+    const cloneId = seq.clone_id !== undefined ? seq.clone_id : null;
+    if (!cloneMap.has(cloneId)) {
+      cloneMap.set(cloneId, []);
+    }
+    cloneMap.get(cloneId)!.push(seq);
+  }
+  
+  // Separate into categories
+  const multiSeqClones: CloneGroup[] = [];  // Clones with ≥2 sequences
+  const singletonSeqs: SequenceData[] = [];  // Clones with 1 sequence
+  const noCloneSeqs: SequenceData[] = [];    // Sequences without clone_id
+  
+  for (const [cloneId, seqs] of cloneMap.entries()) {
+    if (cloneId === null) {
+      // No clone ID assigned
+      noCloneSeqs.push(...seqs);
+    } else if (seqs.length === 1) {
+      // Singleton clone
+      singletonSeqs.push(...seqs);
+    } else {
+      // Multi-sequence clone
+      multiSeqClones.push({
+        cloneId,
+        sequences: seqs,
+        expanded: false,  // Collapsed by default
+        size: seqs.length
+      });
+    }
+  }
+  
+  // Sort multi-sequence clones by size (largest first)
+  multiSeqClones.sort((a, b) => b.size - a.size);
+  
+  // Build final groups array
+  const groups: CloneGroup[] = [...multiSeqClones];
+  
+  // Add "Singletons" folder if there are any
+  if (singletonSeqs.length > 0) {
+    groups.push({
+      cloneId: -1,  // Special ID for Singletons folder
+      sequences: singletonSeqs,
+      expanded: false,  // Collapsed by default
+      size: singletonSeqs.length
+    });
+  }
+  
+  // Add "No Clone" folder if there are any
+  if (noCloneSeqs.length > 0) {
+    groups.push({
+      cloneId: null,
+      sequences: noCloneSeqs,
+      expanded: false,  // Collapsed by default
+      size: noCloneSeqs.length
+    });
+  }
+  
+  return groups;
+}
+
 export function processSequenceResults(data: { sequences: SequenceData[]; file_groups: Record<string, SequenceData[]> }): void {
   const fileGroups: FileGroup[] = Object.entries(data.file_groups).map(([filename, sequences]) => ({
     filename,
     sequences,
+    cloneGroups: groupSequencesByClone(sequences),
     expanded: true
   }));
   
@@ -430,6 +557,29 @@ export function toggleDlFileGroup(filename: string): void {
         ? { ...group, expanded: !group.expanded }
         : group
     )
+  }));
+}
+
+export function toggleCloneGroup(filename: string, cloneId: number | null): void {
+  resultsState.update(state => ({
+    ...state,
+    fileGroups: state.fileGroups.map(fileGroup => {
+      if (fileGroup.filename === filename) {
+        return {
+          ...fileGroup,
+          cloneGroups: fileGroup.cloneGroups.map(cloneGroup => {
+            if (cloneGroup.cloneId === cloneId) {
+              return {
+                ...cloneGroup,
+                expanded: !cloneGroup.expanded
+              };
+            }
+            return cloneGroup;
+          })
+        };
+      }
+      return fileGroup;
+    })
   }));
 }
 

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { resultsState, filteredFileGroups, sequenceSearchQuery, toggleFileGroup, selectSequence } from '../../lib/stores/app';
+  import { resultsState, filteredFileGroups, sequenceSearchQuery, toggleFileGroup, toggleCloneGroup, selectSequence } from '../../lib/stores/app';
   
   // Function to clean the sequence name for display (remove |||filename.fasta suffix)
   function cleanSequenceName(name: string): string {
@@ -68,27 +68,58 @@
           <span class="group-count">{group.sequences.length}</span>
         </button>
         
-        <!-- Sequence list -->
+        <!-- Clone groups within file (Level 1) -->
         {#if group.expanded}
-          <div class="sequence-list">
-            {#each group.sequences as seq}
-              <button 
-                class="sequence-item"
-                class:selected={$resultsState.selectedSequenceId === seq.id}
-                on:click={() => selectSequence(seq.id)}
-              >
-                <div class="seq-main">
-                  <span class="seq-name">{cleanSequenceName(seq.name)}</span>
-                  <div class="badges">
-                    {#if seq.clone_id}
-                      <span class="clone-badge">Clone {seq.clone_id}</span>
-                    {/if}
-                    {#if seq.productive === false}
-                      <span class="nonproductive-badge">Non-productive</span>
-                    {/if}
+          <div class="clones-container">
+            {#each group.cloneGroups as cloneGroup}
+              <div class="clone-group">
+                <!-- Clone header (Level 1) - always show for multi-seq clones and special folders -->
+                <button 
+                  class="group-header clone-header"
+                  on:click={() => toggleCloneGroup(group.filename, cloneGroup.cloneId)}
+                >
+                  <svg 
+                    class="expand-icon"
+                    class:expanded={cloneGroup.expanded}
+                    width="14" 
+                    height="14" 
+                    viewBox="0 0 14 14" 
+                    fill="none"
+                  >
+                    <path d="M5 4l4 3-4 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                  </svg>
+                  {#if cloneGroup.cloneId === -1}
+                    <span class="group-name">Singletons</span>
+                  {:else if cloneGroup.cloneId === null}
+                    <span class="group-name">No Clone</span>
+                  {:else}
+                    <span class="group-name">Clone {cloneGroup.cloneId}</span>
+                  {/if}
+                  <span class="group-count">{cloneGroup.size}</span>
+                </button>
+                
+                <!-- Sequences within clone (Level 2) -->
+                {#if cloneGroup.expanded}
+                  <div class="sequence-list nested">
+                    {#each cloneGroup.sequences as seq}
+                      <button 
+                        class="sequence-item"
+                        class:selected={$resultsState.selectedSequenceId === seq.id}
+                        on:click={() => selectSequence(seq.id)}
+                      >
+                        <div class="seq-main">
+                          <span class="seq-name">{cleanSequenceName(seq.name)}</span>
+                          <div class="badges">
+                            {#if seq.productive === false}
+                              <span class="nonproductive-badge">Non-productive</span>
+                            {/if}
+                          </div>
+                        </div>
+                      </button>
+                    {/each}
                   </div>
-                </div>
-              </button>
+                {/if}
+              </div>
             {/each}
           </div>
         {/if}
@@ -230,8 +261,27 @@
     color: var(--text-secondary);
   }
   
+  .clone-header {
+    /* Same styling as main group-header, but indented */
+    background: var(--gray-50);
+    padding: var(--space-2) var(--space-3);
+    padding-left: calc(var(--space-3) + var(--space-4));  /* Extra indent for nested appearance */
+  }
+  
+  .clone-header:hover {
+    background: var(--gray-100);
+  }
+  
   .sequence-list {
     padding: var(--space-1) var(--space-2);
+  }
+  
+  .sequence-list.nested {
+    padding-left: var(--space-4);
+  }
+  
+  .sequence-list.single {
+    padding: 0;
   }
   
   .sequence-item {

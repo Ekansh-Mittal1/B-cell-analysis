@@ -134,6 +134,10 @@ class PipelineRunner:
         self.clone_mode = config.get('clone_mode', 'allele')  # 'allele' or 'gene'
         self.linkage_method = config.get('linkage_method', 'average')  # 'single', 'average', or 'complete'
         
+        # COVID database matching settings
+        self.run_covid_matching = config.get('run_covid_matching', False)
+        self.cov_abdab_path = config.get('cov_abdab_database_path', '')
+        
         # Set up paths
         self.bin_dir = os.path.join(self.backend_dir, '..', 'geneGUI', 'bin')
         self.data_dir = os.path.join(self.backend_dir, '..', 'geneGUI', 'data')
@@ -968,6 +972,14 @@ class PipelineRunner:
             clone_data = {}
             if os.path.exists(clone_pass_path):
                 clone_df = pd.read_table(clone_pass_path)
+                
+                # Import translation function for AA sequences
+                try:
+                    from utils.covid_db_matcher import translate_dna_to_aa
+                except ImportError:
+                    translate_dna_to_aa = None
+                    self.emit.log("warn", "COVID matcher module not available, AA sequences will not be added")
+                
                 for _, row in clone_df.iterrows():
                     seq_id = str(row['sequence_id'])
                     clone_id = row['clone_id'] if pd.notna(row['clone_id']) else None
@@ -976,12 +988,28 @@ class PipelineRunner:
                     junction = str(row['junction']) if pd.notna(row['junction']) else None
                     junction_aa = str(row['junction_aa']) if pd.notna(row['junction_aa']) else None
                     
+                    # Extract full DNA sequence
+                    dna_seq = str(row['sequence']) if pd.notna(row['sequence']) else None
+                    
+                    # Extract and translate V-J region to AA
+                    aa_seq = None
+                    if dna_seq and translate_dna_to_aa:
+                        try:
+                            v_start = int(row['v_sequence_start']) - 1 if pd.notna(row['v_sequence_start']) else 0
+                            j_end = int(row['j_sequence_end']) if pd.notna(row['j_sequence_end']) else len(dna_seq)
+                            vj_region = dna_seq[v_start:j_end]
+                            aa_seq = translate_dna_to_aa(vj_region)
+                        except Exception as e:
+                            self.emit.log("debug", f"Failed to translate sequence {seq_id}: {str(e)}")
+                    
                     clone_data[seq_id] = {
                         'clone_id': int(clone_id) if clone_id is not None else None,
                         'clone_count': len(clone_df[clone_df['clone_id'] == clone_id]) if clone_id is not None else 0,
                         'productive': True,  # Productive sequences in pass file
                         'cdr3_dna': junction,
-                        'cdr3_peptide': junction_aa
+                        'cdr3_peptide': junction_aa,
+                        'dna_sequence': dna_seq,
+                        'aa_sequence': aa_seq
                     }
             
             # Load non-productive sequences from fail file (if --failed flag was used)
@@ -1263,7 +1291,32 @@ class PipelineRunner:
                 self.emit.complete(False, "Failed to load results")
                 return False
             
-            # Step 12: Run deep learning clustering (DISABLED - uncomment to enable)
+            # Step 12: Run COVID database matching (if enabled)
+            if self.run_covid_matching and self.cov_abdab_path:
+                self.emit.log("info", "COVID database matching is enabled, starting analysis...")
+                try:
+                    from utils.covid_db_matcher import analyze_covid_matches
+                    
+                    clone_pass_path = os.path.join(self.output_dir, 'ig_out_data_db-pass_clone-pass_germ-pass.tsv')
+                    
+                    if os.path.exists(clone_pass_path) and os.path.exists(self.cov_abdab_path):
+                        self.emit.progress("covid_matching", 85, "Matching clones against COVID database...")
+                        
+                        results = analyze_covid_matches(
+                            clone_pass_path=clone_pass_path,
+                            cov_abdab_path=self.cov_abdab_path,
+                            top_n_clones=20
+                        )
+                        
+                        self.emit.result('covid_matches', data=results)
+                        self.emit.log("info", f"COVID matching complete: {results['stats']['clones_with_high_matches']} clones with high matches")
+                    else:
+                        self.emit.log("warn", f"COVID matching enabled but files not found: clone_pass={os.path.exists(clone_pass_path)}, cov_abdab={os.path.exists(self.cov_abdab_path)}")
+                except Exception as e:
+                    self.emit.log("error", f"COVID matching failed: {str(e)}")
+                    # Don't fail the entire pipeline if COVID matching fails
+            
+            # Step 13: Run deep learning clustering (DISABLED - uncomment to enable)
             # self.run_dl_clustering()
             
             self.emit.progress("complete", 100, "Analysis complete!")
@@ -1358,6 +1411,93 @@ def run_public_clone_analysis(config: Dict[str, Any], emit) -> bool:
         return False
 
 
+def run_covid_matching_analysis(config: dict, emit) -> bool:
+    """
+    Run COVID-19 antibody database matching analysis on existing clonality results.
+    
+    This is a separate analysis that can be run after the main pipeline.
+    Matches the top 20 largest clones against the CoV-AbDab COVID antibody database.
+    
+    Args:
+        config: Configuration dictionary with:
+            - output_dir: Directory containing clonality results
+            - cov_abdab_database_path: Path to CoV-AbDab CSV file
+            - top_n_clones: Number of top clones to analyze (default 20)
+        emit: NDJSONEmitter for output
+    
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        from utils.covid_db_matcher import analyze_covid_matches
+        
+        emit.log("info", "=" * 60)
+        emit.log("info", "COVID-19 ANTIBODY DATABASE MATCHING")
+        emit.log("info", "=" * 60)
+        
+        output_dir = config.get('output_dir')
+        cov_abdab_path = config.get('cov_abdab_database_path')
+        top_n = config.get('top_n_clones', 20)
+        
+        if not output_dir:
+            emit.log("error", "No output directory specified")
+            emit.complete(False, "Output directory required")
+            return False
+        
+        if not cov_abdab_path:
+            emit.log("error", "No CoV-AbDab database path specified")
+            emit.complete(False, "CoV-AbDab database path required")
+            return False
+        
+        if not os.path.exists(cov_abdab_path):
+            emit.log("error", f"CoV-AbDab database not found: {cov_abdab_path}")
+            emit.complete(False, "CoV-AbDab database file not found")
+            return False
+        
+        emit.progress("covid_matching", 10, "Loading clonality data...")
+        
+        # Path to clonality data
+        clone_pass_path = os.path.join(output_dir, 'ig_out_data_db-pass_clone-pass_germ-pass.tsv')
+        
+        # Check if required file exists
+        if not os.path.exists(clone_pass_path):
+            emit.log("error", f"Clonality file not found: {clone_pass_path}")
+            emit.complete(False, "Required clonality data not found. Please run main analysis first.")
+            return False
+        
+        emit.progress("covid_matching", 30, "Loading CoV-AbDab database...")
+        emit.log("info", f"CoV-AbDab database: {cov_abdab_path}")
+        emit.log("info", f"Analyzing top {top_n} clones")
+        
+        # Run analysis
+        emit.progress("covid_matching", 50, "Matching sequences against COVID database...")
+        results = analyze_covid_matches(
+            clone_pass_path=clone_pass_path,
+            cov_abdab_path=cov_abdab_path,
+            top_n_clones=top_n
+        )
+        
+        emit.progress("covid_matching", 90, "Finalizing results...")
+        
+        # Emit results
+        emit.result('covid_matches', data=results)
+        
+        stats = results.get('stats', {})
+        emit.log("info", f"Analyzed {stats.get('total_clones_analyzed', 0)} clones")
+        emit.log("info", f"Clones with high matches (≥90%): {stats.get('clones_with_high_matches', 0)}")
+        emit.log("info", f"Database size: {stats.get('database_size', 0)} antibodies")
+        
+        emit.progress("covid_matching", 100, "COVID database matching complete!")
+        emit.complete(True)
+        return True
+        
+    except Exception as e:
+        emit.log("error", f"COVID matching analysis failed: {str(e)}")
+        emit.log("debug", traceback.format_exc())
+        emit.complete(False, str(e))
+        return False
+
+
 def main():
     """Main entry point."""
     emit = NDJSONEmitter
@@ -1382,6 +1522,10 @@ def main():
         elif action == 'public_clones':
             # Run public clone analysis on existing results
             success = run_public_clone_analysis(config.get('config', {}), emit)
+            return 0 if success else 1
+        elif action == 'covid_matching':
+            # Run COVID database matching on existing results
+            success = run_covid_matching_analysis(config.get('config', {}), emit)
             return 0 if success else 1
         else:
             emit.complete(False, f"Unknown action: {action}")

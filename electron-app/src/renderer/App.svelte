@@ -67,6 +67,14 @@
               treeMetadata: data.data.tree_metadata || []
             }));
           }
+          if (data.artifact === 'covid_matches' && data.data) {
+            console.log('[App] Received COVID matching results:', data.data);
+            resultsState.update(s => ({
+              ...s,
+              covidMatchData: data.data,
+              isAnalyzingCovidMatching: false
+            }));
+          }
         })
       );
       

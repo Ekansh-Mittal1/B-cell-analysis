@@ -429,10 +429,22 @@ def find_cdr3_matches(query_cdr3: str, database: dict, min_identity: float = 0.0
     return matches
 
 
+def _resolve_filename(seq_id: str, file_id_mapping: dict) -> str:
+    """Resolve a sequence ID to its original filename using the numeric suffix mapping."""
+    parts = str(seq_id).rsplit('_', 1)
+    if len(parts) == 2 and parts[1] in file_id_mapping:
+        return file_id_mapping[parts[1]]
+    # Legacy fallback
+    if '|||' in str(seq_id):
+        return str(seq_id).split('|||')[1]
+    return ''
+
+
 def analyze_covid_matches(
     clone_pass_path: str,
     cov_abdab_path: str,
-    top_n_clones: int = 20
+    top_n_clones: int = 20,
+    file_id_mapping: dict = None
 ) -> dict:
     """
     Main function to analyze top clones against CoV-AbDab database.
@@ -498,11 +510,11 @@ def analyze_covid_matches(
         
         # Get file names for this clone
         files = []
+        mapping = file_id_mapping or {}
         for seq_id in clone_seqs['sequence_id']:
-            if '|||' in str(seq_id):
-                filename = str(seq_id).split('|||')[1]
-                if filename not in files:
-                    files.append(filename)
+            filename = _resolve_filename(seq_id, mapping)
+            if filename and filename not in files:
+                files.append(filename)
         
         # Extract V-J region from the full sequence for proper VH translation
         # The full sequence includes UTRs and primers - we need only the V-J region

@@ -164,8 +164,55 @@ class PipelineRunner:
         # State
         self.fasta_paths: List[str] = []
         self.combined_fasta: Optional[str] = None
+        self.file_id_mapping: Dict[str, str] = {}   # numeric_id -> filename
+        self.filename_to_id: Dict[str, str] = {}    # filename -> numeric_id
         self.cancelled = False
     
+    def _ensure_file_id_mapping(self):
+        """Load file_id_mapping from disk if not already in memory."""
+        if not self.file_id_mapping:
+            mapping_path = os.path.join(self.output_dir, 'file_id_mapping.json')
+            if os.path.exists(mapping_path):
+                with open(mapping_path, 'r') as f:
+                    self.file_id_mapping = json.load(f)
+                self.filename_to_id = {v: k for k, v in self.file_id_mapping.items()}
+
+    def resolve_filename(self, seq_id: str) -> str:
+        """Extract the original filename from a sequence ID.
+        
+        Sequence IDs have a numeric file suffix: e.g. BARCODE-1_contig_2_1001
+        The last _XXXX is the file ID that maps back to the original filename.
+        """
+        self._ensure_file_id_mapping()
+        
+        # Extract trailing numeric suffix
+        parts = seq_id.rsplit('_', 1)
+        if len(parts) == 2 and parts[1] in self.file_id_mapping:
+            return self.file_id_mapping[parts[1]]
+        
+        # Legacy fallback: ||| delimiter (for old runs)
+        if '|||' in seq_id:
+            return seq_id.split('|||')[-1]
+        
+        return 'unknown.fasta'
+
+    def clean_seq_id(self, seq_id: str) -> str:
+        """Remove the file suffix from a sequence ID for display.
+        
+        e.g. BARCODE-1_contig_2_1001 -> BARCODE-1_contig_2
+        """
+        self._ensure_file_id_mapping()
+        
+        parts = seq_id.rsplit('_', 1)
+        if len(parts) == 2 and parts[1] in self.file_id_mapping:
+            return parts[0]
+        
+        # Legacy fallback
+        if '|||' in seq_id:
+            return seq_id.split('|||')[0]
+        
+        return seq_id
+
     def check_cancelled(self):
         """Check if cancellation was requested."""
         # Non-blocking check for cancel message on stdin
@@ -283,23 +330,38 @@ class PipelineRunner:
         return True
     
     def combine_fasta_files(self) -> bool:
-        """Combine all FASTA files into one."""
+        """Combine all FASTA files into one, adding a unique numeric suffix per file."""
         self.emit.progress("combining", 18, "Combining FASTA files...")
         
         self.combined_fasta = os.path.join(self.output_dir, 'combined.fasta')
         
+        # Assign a unique numeric ID to each input file (starting at 1001 to avoid
+        # collisions with contig numbers like _1, _2, _3 that already exist in headers).
+        self.file_id_mapping = {}   # numeric_id (str) -> filename
+        self.filename_to_id = {}    # filename -> numeric_id (str)
+        
         with open(self.combined_fasta, 'w') as outfile:
-            for fasta_path in self.fasta_paths:
+            for idx, fasta_path in enumerate(self.fasta_paths):
+                file_id = str(1001 + idx)
                 base = os.path.basename(fasta_path)
+                self.file_id_mapping[file_id] = base
+                self.filename_to_id[base] = file_id
+                
                 with open(fasta_path, 'r') as infile:
                     for line in infile:
                         if line.startswith('>'):
-                            # Use ||| as delimiter to avoid conflicts with underscores in filenames
-                            outfile.write(line.rstrip() + '|||' + base + '\n')
+                            # Append _XXXX numeric suffix (same approach as reference pipeline)
+                            outfile.write(line.rstrip() + '_' + file_id + '\n')
                         else:
                             outfile.write(line)
         
+        # Persist the mapping so downstream steps can resolve file IDs back to filenames
+        mapping_path = os.path.join(self.output_dir, 'file_id_mapping.json')
+        with open(mapping_path, 'w') as f:
+            json.dump(self.file_id_mapping, f, indent=2)
+        
         self.emit.log("info", f"Combined {len(self.fasta_paths)} files into {self.combined_fasta}")
+        self.emit.log("info", f"File ID mapping: {self.file_id_mapping}")
         return True
     
     def build_blast_databases(self) -> bool:
@@ -383,6 +445,9 @@ class PipelineRunner:
                 # Restore original outs_dir
                 clonalityFunctions.outs_dir = original_outs_dir
             
+            disttonearest_path = os.path.join(self.output_dir, 'disttonearest.tsv')
+            if os.path.exists(disttonearest_path):
+                self.emit.log("info", f"Distance-to-nearest data saved to disttonearest.tsv")
             self.emit.log("info", f"Calculated distance threshold: {calculated_dist}")
             
             # Request user confirmation
@@ -1043,25 +1108,10 @@ class PipelineRunner:
                         # Could calculate from junction_length if needed
                         pass
             
-            # Group sequences by file
+            # Group sequences by file using the numeric suffix -> filename mapping
             file_groups = {}
             for seq in sequences:
-                # Extract filename from sequence ID (format: seqname|||filename.fasta)
-                # The filename is appended with ||| delimiter to avoid conflicts with underscores
-                seq_id = seq['id']
-                
-                # Split by the ||| delimiter
-                if '|||' in seq_id:
-                    parts = seq_id.split('|||')
-                    filename = parts[-1] if len(parts) > 1 else 'unknown.fasta'
-                else:
-                    # Fallback for old format with _ delimiter
-                    parts = seq_id.rsplit('_', 1)
-                    if len(parts) > 1 and (parts[1].endswith('.fasta') or parts[1].endswith('.fa')):
-                        filename = parts[1]
-                    else:
-                        filename = 'unknown.fasta'
-                
+                filename = self.resolve_filename(seq['id'])
                 if filename not in file_groups:
                     file_groups[filename] = []
                 file_groups[filename].append(seq)
@@ -1182,23 +1232,10 @@ class PipelineRunner:
                 
                 dl_sequences.append(seq_record)
             
-            # Group DL sequences by file (same logic as traditional clustering)
+            # Group DL sequences by file using the numeric suffix -> filename mapping
             file_groups = {}
             for seq in dl_sequences:
-                seq_id = seq['id']
-                
-                # Split by the ||| delimiter
-                if '|||' in seq_id:
-                    parts = seq_id.split('|||')
-                    filename = parts[-1] if len(parts) > 1 else 'unknown.fasta'
-                else:
-                    # Fallback for old format
-                    parts = seq_id.rsplit('_', 1)
-                    if len(parts) > 1 and (parts[1].endswith('.fasta') or parts[1].endswith('.fa')):
-                        filename = parts[1]
-                    else:
-                        filename = 'unknown.fasta'
-                
+                filename = self.resolve_filename(seq['id'])
                 if filename not in file_groups:
                     file_groups[filename] = []
                 file_groups[filename].append(seq)
@@ -1305,7 +1342,8 @@ class PipelineRunner:
                         results = analyze_covid_matches(
                             clone_pass_path=clone_pass_path,
                             cov_abdab_path=self.cov_abdab_path,
-                            top_n_clones=20
+                            top_n_clones=20,
+                            file_id_mapping=self.file_id_mapping
                         )
                         
                         self.emit.result('covid_matches', data=results)
@@ -1382,6 +1420,13 @@ def run_public_clone_analysis(config: Dict[str, Any], emit) -> bool:
         emit.progress("public_clones", 50, "Analyzing public clones...")
         emit.log("info", f"Analyzing {len(sequences_data)} sequences with top_n={top_n}")
         
+        # Load file ID mapping if available
+        mapping_path = os.path.join(output_dir, 'file_id_mapping.json')
+        file_id_mapping = {}
+        if os.path.exists(mapping_path):
+            with open(mapping_path, 'r') as f:
+                file_id_mapping = json.load(f)
+        
         # Run analysis
         results = analyze_public_clones(
             clone_pass_path,
@@ -1389,7 +1434,8 @@ def run_public_clone_analysis(config: Dict[str, Any], emit) -> bool:
             mode=mode,
             similarity_threshold=similarity_threshold,
             max_aa_mismatches=max_mismatches,
-            top_n=top_n
+            top_n=top_n,
+            file_id_mapping=file_id_mapping
         )
         
         emit.progress("public_clones", 90, "Generating visualization data...")
@@ -1469,12 +1515,20 @@ def run_covid_matching_analysis(config: dict, emit) -> bool:
         emit.log("info", f"CoV-AbDab database: {cov_abdab_path}")
         emit.log("info", f"Analyzing top {top_n} clones")
         
+        # Load file ID mapping if available
+        mapping_path = os.path.join(output_dir, 'file_id_mapping.json')
+        file_id_mapping = {}
+        if os.path.exists(mapping_path):
+            with open(mapping_path, 'r') as f:
+                file_id_mapping = json.load(f)
+        
         # Run analysis
         emit.progress("covid_matching", 50, "Matching sequences against COVID database...")
         results = analyze_covid_matches(
             clone_pass_path=clone_pass_path,
             cov_abdab_path=cov_abdab_path,
-            top_n_clones=top_n
+            top_n_clones=top_n,
+            file_id_mapping=file_id_mapping
         )
         
         emit.progress("covid_matching", 90, "Finalizing results...")

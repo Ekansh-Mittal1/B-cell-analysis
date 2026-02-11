@@ -267,7 +267,8 @@ def analyze_public_clones(
     mode: str = 'lenient',
     similarity_threshold: float = 0.85,
     max_aa_mismatches: Optional[int] = None,
-    top_n: int = 10
+    top_n: int = 10,
+    file_id_mapping: dict = None
 ) -> Dict[str, Any]:
     """
     Identify public clones (shared across multiple FASTA files/patients).
@@ -324,10 +325,16 @@ def analyze_public_clones(
     clone_df = pd.read_table(clone_pass_path)
     
     # Create a mapping: sequence_id -> file
+    mapping = file_id_mapping or {}
     seq_to_file = {}
     for seq in sequences_data:
         seq_id = seq['id']
-        if '|||' in seq_id:
+        # Try numeric suffix first
+        parts = seq_id.rsplit('_', 1)
+        if len(parts) == 2 and parts[1] in mapping:
+            seq_to_file[seq_id] = mapping[parts[1]]
+        elif '|||' in seq_id:
+            # Legacy fallback
             base_id, filename = seq_id.split('|||', 1)
             seq_to_file[seq_id] = filename
         else:

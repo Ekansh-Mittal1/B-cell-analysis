@@ -1,10 +1,16 @@
 <script lang="ts">
   import { resultsState, filteredDlFileGroups, sequenceSearchQuery, toggleDlFileGroup, selectDlSequence } from '../../lib/stores/app';
   
-  // Function to clean the sequence name for display (remove |||filename.fasta suffix)
+  // Function to clean the sequence name for display (remove file ID suffix)
   function cleanSequenceName(name: string): string {
+    // Legacy format: |||filename.fasta
     if (name.includes('|||')) {
       return name.split('|||')[0];
+    }
+    // New format: numeric file ID suffix _XXXX (4+ digits, >= 1001)
+    const match = name.match(/^(.+)_(\d{4,})$/);
+    if (match && parseInt(match[2]) >= 1001) {
+      return match[1];
     }
     // Fallback for old format with _ delimiter
     if (name.includes('_') && (name.endsWith('.fasta') || name.endsWith('.fa'))) {

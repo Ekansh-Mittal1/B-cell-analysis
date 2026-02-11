@@ -60,6 +60,15 @@ result <- tryCatch({
     return(0.1)
   }
   
+  # Write disttonearest.tsv (db with dist_nearest column) to output directory
+  output_dir <- dirname(args[1])
+  dist_output_path <- file.path(output_dir, "disttonearest.tsv")
+  tryCatch({
+    write.table(db, file = dist_output_path, sep = "\t", row.names = FALSE, quote = FALSE)
+  }, error = function(e) {
+    warning(paste("Failed to write disttonearest.tsv:", e$message))
+  })
+  
   # Remove NA values and filter out zeros and extreme values
   valid_dists <- db$dist_nearest[!is.na(db$dist_nearest) & db$dist_nearest > 0 & db$dist_nearest <= 1]
   if (length(valid_dists) == 0) {
@@ -166,13 +175,19 @@ result <- tryCatch({
     0.1  # Return default threshold
   })
   
-  # Try to create plot if possible (don't fail if this doesn't work)
-  # Note: valid_dists and threshold are in the outer scope
+  # Try to create plot if possible (histogram + density curve, like reference pipeline)
   tryCatch({
     if (exists("valid_dists") && length(valid_dists) > 0 && exists("threshold") && !is.null(threshold)) {
-      png(filename = args[2])
-      hist(valid_dists, breaks=50, main=paste("Distance Distribution (threshold =", round(threshold, 3), ")"), xlab="Distance")
-      abline(v=threshold, col="red", lwd=2)
+      png(filename = args[2], width = 600, height = 480, res = 100)
+      # Histogram with density on y-axis
+      h <- hist(valid_dists, breaks = 50, freq = FALSE, col = "grey70", border = "grey40",
+                main = paste("Distance Distribution - Density Method Threshold =", round(threshold, 3)),
+                xlab = "Distance", ylab = "Density", xlim = c(0, 1))
+      # Overlay kernel density estimate
+      dens <- density(valid_dists, from = 0, to = 1, n = 512)
+      lines(dens, col = "navy", lwd = 2)
+      # Threshold line (dashed)
+      abline(v = threshold, col = "darkred", lty = 2, lwd = 2)
       dev.off()
     }
   }, error = function(e) {

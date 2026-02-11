@@ -51,11 +51,16 @@
     const rows = sequences.map(seq => {
       // Extract file name from sequence ID if file field is not available
       let fileName = seq.file || '';
-      if (!fileName && seq.id.includes('|||')) {
-        const parts = seq.id.split('|||');
-        if (parts.length > 1) {
-          fileName = parts[1];
+      if (!fileName) {
+        // Legacy format: |||filename
+        if (seq.id.includes('|||')) {
+          const parts = seq.id.split('|||');
+          if (parts.length > 1) {
+            fileName = parts[1];
+          }
         }
+        // New format: numeric suffix is handled by backend grouping;
+        // fileName will be set from the file group key
       }
       
       return [

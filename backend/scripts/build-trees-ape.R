@@ -107,10 +107,8 @@ for (fasta_file in fasta_files) {
             # Clean the label to match against sequence_counts keys
             base_label <- clean_label_base(label)
             
-            # Clean the display label (remove ||| and suffixes)
+            # Clean the display label - keep file ID suffix (_1001, _1002, etc.) for traceability
             display_label <- sub("\\|\\|\\|.*$", "", label)
-            display_label <- sub("_\\d+$", "", display_label)
-            display_label <- sub("\\s+\\d+$", "", display_label)
             display_label <- trimws(display_label)
             
             # Try exact match with cleaned label

@@ -358,7 +358,7 @@
                         <div class="patient-item" style="border-left: 4px solid {getPatientColor(index)}">
                           <div class="patient-name">{patient}</div>
                           <div class="patient-count">
-                            {selectedClone.sequences.filter(s => s.includes(patient)).length} sequences
+                            {(selectedClone.sequences_by_patient?.[patient]?.length ?? 0)} sequences
                           </div>
                         </div>
                       {/each}

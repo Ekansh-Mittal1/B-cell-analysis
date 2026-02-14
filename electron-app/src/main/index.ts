@@ -61,6 +61,7 @@ function createWindow(): void {
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
+      backgroundThrottling: false,
       preload: (() => {
         const preloadPath = path.resolve(__dirname, '..', 'preload', 'index.js');
         if (!fs.existsSync(preloadPath)) {

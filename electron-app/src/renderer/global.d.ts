@@ -88,6 +88,9 @@ interface ElectronAPI {
   sendThresholdResponse: (value: number) => Promise<void>;
   cancelPipeline: () => Promise<void>;
 
+  // Load results from a previous run
+  loadResults: (outputDir: string) => Promise<void>;
+
   // Public clone analysis
   runPublicCloneAnalysis: (config: {
     output_dir: string;

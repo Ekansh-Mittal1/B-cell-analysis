@@ -174,11 +174,12 @@ def generate_visualization_data(
         # Create presence/absence and frequency rows
         presence_row = []
         frequency_row = []
+        sequences_by_patient = clone.get('sequences_by_patient', {})
         for patient in viz_data['heatmap']['patients']:
             if patient in clone['patients']:
                 presence_row.append(1)
-                # Count sequences from this patient in this clone
-                patient_seqs = [s for s in clone['sequences'] if patient in s]
+                # Count sequences from this patient (use sequences_by_patient, not broken 'patient in s')
+                patient_seqs = sequences_by_patient.get(patient, [])
                 frequency_row.append(len(patient_seqs))
             else:
                 presence_row.append(0)
@@ -404,6 +405,14 @@ def analyze_public_clones(
             rep_id = rep_seq[3]
             rep_meta = seq_metadata[rep_id]
             
+            # Build sequences_by_patient: filename -> [seq_ids] for heatmap frequency counts
+            sequences_by_patient: Dict[str, List[str]] = {}
+            for cdr3_aa, v_gene, j_gene, seq_id in cluster_seqs:
+                f = seq_metadata[seq_id]['file']
+                if f not in sequences_by_patient:
+                    sequences_by_patient[f] = []
+                sequences_by_patient[f].append(seq_id)
+            
             # Calculate sequence diversity in cluster
             unique_cdr3s = list(set([s[0] for s in cluster_seqs]))
             avg_similarity = 1.0
@@ -425,6 +434,7 @@ def analyze_public_clones(
                 'patient_count': num_files,
                 'patients': sorted(list(files_in_cluster)),
                 'sequences': seq_ids_in_cluster,
+                'sequences_by_patient': sequences_by_patient,
                 'unique_cdr3_variants': len(unique_cdr3s),
                 'avg_intra_cluster_similarity': round(avg_similarity, 3)
             })

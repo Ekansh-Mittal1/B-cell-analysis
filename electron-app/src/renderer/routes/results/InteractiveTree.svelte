@@ -124,47 +124,53 @@
       tree = new Phylotree(newickString);
       console.log('[InteractiveTree] Step 6: Phylotree instance created');
       
+      // Use actual tip count for layout (collapsed trees have fewer tips than clone size)
+      const tipCount = tree.getTips ? tree.getTips().length : cloneSize;
+      console.log('[InteractiveTree] Tree has', tipCount, 'tips (clone has', cloneSize, 'sequences)');
+      
       console.log('[InteractiveTree] Step 7: Rendering tree (may take a few seconds)...');
       
-      // Calculate spacing, font size, and container height based on number of sequences
-      // Strategy: Give each sequence more vertical space by increasing container height
-      let topBottomSpacing: number = 20; // Fixed spacing per sequence
+      // Calculate spacing, font size, and container height based on actual tip count
+      // (collapsed trees have fewer tips, so we don't over-allocate vertical space)
+      let topBottomSpacing: number = 20;
       let fontSize = '11px';
-      let calculatedHeight = height; // Start with container height
+      let calculatedHeight = height;
       
-      // Calculate optimal spacing and font size based on clone size
-      if (cloneSize < 10) {
-        topBottomSpacing = 150; // VERY large spacing for small trees
+      if (tipCount < 10) {
+        topBottomSpacing = 80; // Large spacing for small trees
         fontSize = '11px';
-        calculatedHeight = Math.max(800, cloneSize * topBottomSpacing);
-      } else if (cloneSize < 30) {
-        topBottomSpacing = 80; // Large spacing
-        fontSize = '11px';
-        calculatedHeight = Math.max(800, cloneSize * topBottomSpacing);
-      } else if (cloneSize < 60) {
+        calculatedHeight = Math.max(600, tipCount * topBottomSpacing);
+      } else if (tipCount < 30) {
         topBottomSpacing = 50; // Medium spacing
         fontSize = '10px';
-        calculatedHeight = Math.max(1000, cloneSize * topBottomSpacing);
-      } else if (cloneSize < 100) {
+        calculatedHeight = Math.max(600, tipCount * topBottomSpacing);
+      } else if (tipCount < 60) {
         topBottomSpacing = 35; // Smaller spacing
         fontSize = '9px';
-        calculatedHeight = Math.max(1500, cloneSize * topBottomSpacing);
-      } else if (cloneSize < 200) {
+        calculatedHeight = Math.max(800, tipCount * topBottomSpacing);
+      } else if (tipCount < 100) {
+        topBottomSpacing = 28; // Compact
+        fontSize = '8px';
+        calculatedHeight = Math.max(1000, tipCount * topBottomSpacing);
+      } else if (tipCount < 200) {
         topBottomSpacing = 25; // Compact spacing
         fontSize = '8px';
-        calculatedHeight = Math.max(2000, cloneSize * topBottomSpacing);
-      } else if (cloneSize < 300) {
-        topBottomSpacing = 20; // Very compact spacing
+        calculatedHeight = Math.max(1200, tipCount * topBottomSpacing);
+      } else if (tipCount < 300) {
+        topBottomSpacing = 20; // Very compact
         fontSize = '7px';
-        calculatedHeight = Math.max(3000, cloneSize * topBottomSpacing);
+        calculatedHeight = Math.max(1500, tipCount * topBottomSpacing);
       } else {
-        // For very large trees (>300), use minimum spacing with very small font
-        topBottomSpacing = 15;
+        topBottomSpacing = 16; // Minimum spacing for very large trees
         fontSize = '6px';
-        calculatedHeight = Math.max(4000, cloneSize * topBottomSpacing);
+        calculatedHeight = Math.max(2000, tipCount * topBottomSpacing);
       }
       
-      console.log('[InteractiveTree] Using top-bottom-spacing:', topBottomSpacing, 'font-size:', fontSize, 'calculated-height:', calculatedHeight, 'for', cloneSize, 'sequences');
+      // Cap height to avoid excessively tall SVGs (e.g. 5000px max)
+      const maxHeight = 4000;
+      calculatedHeight = Math.min(calculatedHeight, maxHeight);
+      
+      console.log('[InteractiveTree] Using top-bottom-spacing:', topBottomSpacing, 'font-size:', fontSize, 'calculated-height:', calculatedHeight, 'for', tipCount, 'tips');
       
       // Render the tree - render() returns a TreeRender object
       // phylotree will create its own SVG inside the container

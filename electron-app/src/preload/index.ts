@@ -79,6 +79,9 @@ const api = {
   cancelPipeline: (): Promise<void> => 
     ipcRenderer.invoke('pipeline:cancel'),
 
+  loadResults: (outputDir: string): Promise<{ success: boolean; error?: string }> =>
+    ipcRenderer.invoke('pipeline:loadResults', outputDir),
+
   // Public clone analysis
   runPublicCloneAnalysis: (config: {
     output_dir: string;

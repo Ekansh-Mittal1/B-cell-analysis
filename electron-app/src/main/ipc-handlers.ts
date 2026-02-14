@@ -25,6 +25,7 @@ export function setupIpcHandlers(
   ipcMain.removeHandler('dialog:selectDirectory');
   ipcMain.removeHandler('dialog:selectFile');
   ipcMain.removeHandler('dialog:saveFile');
+  ipcMain.removeHandler('pipeline:loadResults');
   ipcMain.removeHandler('pipeline:runPublicCloneAnalysis');
   
   // Dialog: Select directory
@@ -189,6 +190,28 @@ export function setupIpcHandlers(
   // Cancel pipeline
   ipcMain.handle('pipeline:cancel', async () => {
     backendRunner.cancel();
+  });
+
+  // Load results from disk (restore after sleep/minimize)
+  ipcMain.handle('pipeline:loadResults', async (event, outputDir: string) => {
+    return new Promise((resolve, reject) => {
+      const onProgress = (data: any) => mainWindow?.webContents.send('pipeline:progress', data);
+      const onLog = (data: any) => mainWindow?.webContents.send('pipeline:log', data);
+      const onResult = (data: any) => mainWindow?.webContents.send('pipeline:result', data);
+      const onComplete = (data: any) => {
+        resolve(data);
+      };
+      const onError = (error: Error) => reject(error);
+
+      backendRunner.runLoadResults(outputDir, {
+        onProgress,
+        onLog,
+        onResult,
+        onThresholdRequest: () => {},
+        onComplete,
+        onError
+      });
+    });
   });
 
   // Run public clone analysis

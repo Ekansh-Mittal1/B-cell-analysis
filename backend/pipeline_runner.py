@@ -675,17 +675,15 @@ class PipelineRunner:
             original_cwd = os.getcwd()
             try:
                 os.chdir(self.output_dir)
-                # Build trees with BuildTrees (removed --collapse to keep more unique sequences)
+                # Build trees with BuildTrees (--collapse: deduplicate identical sequences before tree building, matches validated pipeline)
                 # --clean all: only remove sequences with ambiguous nucleotides
-                # This preserves more phylogenetic information for lineage reconstruction
-                # Log to file for debugging
                 debug_log = os.path.join(self.output_dir, 'tree_building_debug.log')
                 with open(debug_log, 'w') as f:
                     f.write(f"Running BuildTrees.py at {os.getcwd()}\n")
-                    f.write(f"Command: BuildTrees.py -d build-trees-input.tsv --clean all\n\n")
+                    f.write(f"Command: BuildTrees.py -d build-trees-input.tsv --clean all --collapse\n\n")
                 
                 build_trees_result = subprocess.run(
-                    ['BuildTrees.py', '-d', 'build-trees-input.tsv', '--clean', 'all'],
+                    ['BuildTrees.py', '-d', 'build-trees-input.tsv', '--clean', 'all', '--collapse'],
                     capture_output=True,
                     text=True,
                     timeout=600
@@ -1116,12 +1114,14 @@ class PipelineRunner:
                     file_groups[filename] = []
                 file_groups[filename].append(seq)
             
-            # Emit results
+            # Emit results (include file_id_mapping for ID→filename lookup in UI)
             self.emit.result("sequences", data={
                 "sequences": sequences,
                 "file_groups": file_groups,
                 "total_count": len(sequences),
-                "output_dir": self.output_dir
+                "output_dir": self.output_dir,
+                "file_id_mapping": self.file_id_mapping,
+                "fasta_dir": self.fasta_dir
             })
             
             return True
@@ -1368,6 +1368,79 @@ class PipelineRunner:
             return False
 
 
+def run_load_results(config: Dict[str, Any], emit) -> bool:
+    """
+    Load and emit results from a previous run (restore after app sleep/minimize).
+    
+    Args:
+        config: Must contain output_dir
+        emit: NDJSONEmitter for output
+    
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        output_dir = config.get('output_dir')
+        if not output_dir or not os.path.isdir(output_dir):
+            emit.log("error", f"Invalid or missing output_dir: {output_dir}")
+            emit.complete(False, "Invalid output directory")
+            return False
+        
+        # Create minimal runner with output_dir and combined_fasta path
+        runner = PipelineRunner({'output_dir': output_dir, 'fasta_dir': ''})
+        runner.combined_fasta = os.path.join(output_dir, 'combined.fasta')
+        
+        if not runner.load_results():
+            return False
+        
+        # Also emit existing tree images (they're on disk from the previous run)
+        trees_dir = os.path.join(output_dir, 'trees')
+        if os.path.isdir(trees_dir):
+            all_tree_images = glob.glob(os.path.join(trees_dir, '*.png'))
+            all_tree_newicks = {os.path.basename(f).replace('.newick', '') for f in glob.glob(os.path.join(trees_dir, '*.newick'))}
+            tree_images = [img for img in all_tree_images
+                          if os.path.basename(img).replace('.png', '') in all_tree_newicks]
+            if tree_images:
+                import pandas as pd
+                clone_sizes = {}
+                clone_pass_path = os.path.join(output_dir, 'ig_out_data_db-pass_clone-pass_germ-pass.tsv')
+                if os.path.exists(clone_pass_path):
+                    clone_df = pd.read_table(clone_pass_path)
+                    for cid in clone_df['clone_id'].unique():
+                        if pd.notna(cid):
+                            clone_sizes[int(cid)] = len(clone_df[clone_df['clone_id'] == cid])
+                def get_clone_size(tree_path):
+                    basename = os.path.basename(tree_path)
+                    match = basename.replace('tree_', '').replace('.png', '')
+                    try:
+                        return clone_sizes.get(int(match), 0)
+                    except ValueError:
+                        return 0
+                tree_images.sort(key=get_clone_size, reverse=True)
+                tree_data = []
+                for tree_path in tree_images:
+                    abs_path = os.path.abspath(tree_path)
+                    basename = os.path.basename(abs_path)
+                    match = basename.replace('tree_', '').replace('.png', '')
+                    try:
+                        clone_id = int(match)
+                        tree_data.append({'path': abs_path, 'clone_id': clone_id, 'clone_size': clone_sizes.get(clone_id, 0)})
+                    except ValueError:
+                        tree_data.append({'path': abs_path, 'clone_id': None, 'clone_size': 0})
+                emit.result("tree_images", data={"images": tree_images, "tree_metadata": tree_data})
+            else:
+                emit.result("tree_images", data={"images": [], "tree_metadata": []})
+        else:
+            emit.result("tree_images", data={"images": [], "tree_metadata": []})
+        
+        emit.complete(True)
+        return True
+    except Exception as e:
+        emit.log("error", f"Failed to load results: {str(e)}")
+        emit.complete(False, str(e))
+        return False
+
+
 def run_public_clone_analysis(config: Dict[str, Any], emit) -> bool:
     """
     Run public clone analysis on existing results.
@@ -1580,6 +1653,10 @@ def main():
         elif action == 'covid_matching':
             # Run COVID database matching on existing results
             success = run_covid_matching_analysis(config.get('config', {}), emit)
+            return 0 if success else 1
+        elif action == 'load_results':
+            # Restore results from disk (e.g. after app wake from sleep)
+            success = run_load_results(config.get('config', {}), emit)
             return 0 if success else 1
         else:
             emit.complete(False, f"Unknown action: {action}")

@@ -84,10 +84,8 @@ add_sequence_counts <- function(dna, tip_labels, clone_id, sequence_counts_by_cl
             next
         }
         
-        # Clean the display label
+        # Clean the display label - keep file ID suffix (_1001, _1002, etc.) for traceability
         display_label <- sub("\\|\\|\\|.*$", "", label)
-        display_label <- sub("_\\d+$", "", display_label)
-        display_label <- sub("\\s+\\d+$", "", display_label)
         display_label <- trimws(display_label)
         
         # Get the DNA sequence content for this tip

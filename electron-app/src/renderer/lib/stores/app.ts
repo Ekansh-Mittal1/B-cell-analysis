@@ -79,6 +79,8 @@ export interface PublicCloneResult {
   patient_count: number;
   patients: string[];
   sequences: string[];
+  /** Patient filename -> list of sequence IDs (for per-patient counts) */
+  sequences_by_patient?: Record<string, string[]>;
   unique_cdr3_variants: number;
   avg_intra_cluster_similarity: number;
 }
@@ -185,6 +187,8 @@ export interface ResultsState {
   treeImages: string[];
   treeMetadata: TreeMetadata[];
   outputDir: string | null;
+  /** Mapping of numeric file ID (e.g. "1001") to original filename */
+  fileIdMapping: Record<string, string>;
   publicClonesData: PublicClonesData | null;
   isAnalyzingPublicClones: boolean;
   covidMatchData: CovidMatchData | null;
@@ -193,10 +197,67 @@ export interface ResultsState {
 
 export interface AnalysisState {
   isRunning: boolean;
+  isSessionLoad: boolean;  // True when loading a previous session (not a real pipeline run)
   progress: AnalysisProgress | null;
   logs: LogEntry[];
   error: string | null;
   thresholdRequest: number | null;
+}
+
+// ============================================
+// Session History
+// ============================================
+
+export interface SessionEntry {
+  id: string;
+  name: string;
+  outputDir: string;
+  date: string;        // ISO 8601 timestamp
+  fileCount: number;
+  fastaDir: string;
+}
+
+const SESSIONS_KEY = 'bcr_sessions';
+
+function generateId(): string {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+}
+
+export function getSessions(): SessionEntry[] {
+  try {
+    const raw = localStorage.getItem(SESSIONS_KEY);
+    if (!raw) return [];
+    const sessions: SessionEntry[] = JSON.parse(raw);
+    // Sort by date descending (most recent first)
+    return sessions.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+  } catch {
+    return [];
+  }
+}
+
+export function saveSession(entry: Omit<SessionEntry, 'id'>): SessionEntry {
+  const sessions = getSessions();
+  const newEntry: SessionEntry = {
+    id: generateId(),
+    ...entry
+  };
+  sessions.unshift(newEntry);
+  localStorage.setItem(SESSIONS_KEY, JSON.stringify(sessions));
+  return newEntry;
+}
+
+export function deleteSession(id: string): void {
+  const sessions = getSessions().filter(s => s.id !== id);
+  localStorage.setItem(SESSIONS_KEY, JSON.stringify(sessions));
+}
+
+export function renameSession(id: string, newName: string): void {
+  const sessions = getSessions();
+  const session = sessions.find(s => s.id === id);
+  if (session) {
+    session.name = newName;
+    localStorage.setItem(SESSIONS_KEY, JSON.stringify(sessions));
+  }
 }
 
 
@@ -227,6 +288,7 @@ export const wizardState: Writable<WizardState> = writable({
 // Analysis state
 export const analysisState: Writable<AnalysisState> = writable({
   isRunning: false,
+  isSessionLoad: false,
   progress: null,
   logs: [],
   error: null,
@@ -244,6 +306,7 @@ export const resultsState: Writable<ResultsState> = writable({
   treeImages: [],
   treeMetadata: [],
   outputDir: null,
+  fileIdMapping: {},
   publicClonesData: null,
   isAnalyzingPublicClones: false,
   covidMatchData: null,
@@ -410,6 +473,7 @@ export function resetWizard(): void {
 export function resetAnalysis(): void {
   analysisState.set({
     isRunning: false,
+    isSessionLoad: false,
     progress: null,
     logs: [],
     error: null,
@@ -495,7 +559,12 @@ function groupSequencesByClone(sequences: SequenceData[]): CloneGroup[] {
   return groups;
 }
 
-export function processSequenceResults(data: { sequences: SequenceData[]; file_groups: Record<string, SequenceData[]> }): void {
+export function processSequenceResults(data: {
+  sequences: SequenceData[];
+  file_groups: Record<string, SequenceData[]>;
+  output_dir?: string;
+  file_id_mapping?: Record<string, string>;
+}): void {
   const fileGroups: FileGroup[] = Object.entries(data.file_groups).map(([filename, sequences]) => ({
     filename,
     sequences,
@@ -506,7 +575,9 @@ export function processSequenceResults(data: { sequences: SequenceData[]; file_g
   resultsState.update(state => ({
     ...state,
     sequences: data.sequences,
-    fileGroups
+    fileGroups,
+    ...(data.output_dir != null && { outputDir: data.output_dir }),
+    ...(data.file_id_mapping != null && { fileIdMapping: data.file_id_mapping })
   }));
 }
 

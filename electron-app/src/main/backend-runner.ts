@@ -217,6 +217,65 @@ export class BackendRunner {
   }
 
   /**
+   * Load results from disk (restore after app sleep/minimize)
+   */
+  runLoadResults(outputDir: string, callbacks: RunCallbacks): void {
+    const pipelineScript = path.join(this.options.backendDir, 'pipeline_runner.py');
+    
+    const env = {
+      ...process.env,
+      PATH: `${this.options.binDir}:${process.env.PATH}`,
+      IGDATA: this.options.dataDir
+    };
+
+    this.process = spawn(this.options.pythonPath!, [pipelineScript], {
+      cwd: this.options.backendDir,
+      env,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      detached: true
+    });
+
+    this.process.unref();
+
+    if (!this.process.stdout || !this.process.stdin) {
+      callbacks.onError(new Error('Failed to create process streams'));
+      return;
+    }
+
+    this.rl = readline.createInterface({
+      input: this.process.stdout,
+      crlfDelay: Infinity
+    });
+
+    this.rl.on('line', (line: string) => {
+      this.handleMessage(line, callbacks);
+    });
+
+    this.process.stderr?.on('data', (data: Buffer) => {
+      callbacks.onLog({ level: 'debug', message: `[stderr] ${data.toString()}` });
+    });
+
+    this.process.on('exit', (code: number | null, signal: string | null) => {
+      console.log(`Load results process exited with code ${code}, signal ${signal}`);
+      this.cleanup();
+      if (code !== 0 && code !== null) {
+        callbacks.onComplete({ success: false, error: `Process exited with code ${code}` });
+      }
+    });
+
+    this.process.on('error', (error: Error) => {
+      callbacks.onError(error);
+      this.cleanup();
+    });
+
+    const startMessage = JSON.stringify({
+      action: 'load_results',
+      config: { output_dir: outputDir }
+    });
+    this.process.stdin.write(startMessage + '\n');
+  }
+
+  /**
    * Run public clone analysis
    */
   runPublicCloneAnalysis(

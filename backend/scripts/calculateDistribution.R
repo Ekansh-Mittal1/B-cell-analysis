@@ -1,6 +1,9 @@
 # Set up error handling to always output a value
 options(warn=1)  # Convert warnings to messages, don't stop execution
 
+# Set seed for reproducibility (distToNearest, findThreshold GMM, density)
+set.seed(42)
+
 # Wrap everything in a tryCatch to ensure we always return a value
 result <- tryCatch({
   suppressWarnings({

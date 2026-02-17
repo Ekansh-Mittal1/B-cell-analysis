@@ -3,11 +3,12 @@
   import SequenceBrowser from './SequenceBrowser.svelte';
   import SequenceDetails from './SequenceDetails.svelte';
   import DlSequenceBrowser from './DlSequenceBrowser.svelte';
+  import RepertoireDashboard from './RepertoireDashboard.svelte';
   import PhylogeneticTrees from './PhylogeneticTrees.svelte';
   import PublicClones from './PublicClones.svelte';
   import CovidMatching from './CovidMatching.svelte';
   
-  type Tab = 'browser' | 'dl-browser' | 'trees' | 'public-clones' | 'covid-matching';
+  type Tab = 'browser' | 'dl-browser' | 'dashboard' | 'trees' | 'public-clones' | 'covid-matching';
   let activeTab: Tab = 'browser';
   let isExporting = false;
 
@@ -42,6 +43,7 @@
       'CDR3 Length (bp)',
       'Somatic Mutations',
       'Isotype',
+      'C Call (Ig Class)',
       'Clone ID',
       'Clone Count',
       'Productive'
@@ -78,6 +80,7 @@
         escapeCsvValue(seq.cdr3_dna ? seq.cdr3_dna.length : ''),
         escapeCsvValue(seq.somatic_mutations),
         escapeCsvValue(seq.isotype),
+        escapeCsvValue(seq.c_call ?? ''),
         escapeCsvValue(seq.clone_id),
         escapeCsvValue(seq.clone_count),
         escapeCsvValue(seq.productive ? 'Yes' : 'No')
@@ -197,6 +200,18 @@
       {/if}
       <button 
         class="tab" 
+        class:active={activeTab === 'dashboard'}
+        on:click={() => activeTab = 'dashboard'}
+      >
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+          <rect x="2" y="8" width="3" height="6" rx="0.5" stroke="currentColor" stroke-width="1.5" fill="none"/>
+          <rect x="6.5" y="5" width="3" height="9" rx="0.5" stroke="currentColor" stroke-width="1.5" fill="none"/>
+          <rect x="11" y="2" width="3" height="12" rx="0.5" stroke="currentColor" stroke-width="1.5" fill="none"/>
+        </svg>
+        Dashboard
+      </button>
+      <button 
+        class="tab" 
         class:active={activeTab === 'trees'}
         on:click={() => activeTab = 'trees'}
       >
@@ -297,6 +312,8 @@
           {/if}
         </main>
       </div>
+    {:else if activeTab === 'dashboard'}
+      <RepertoireDashboard on:switch-tab={(e) => activeTab = e.detail} />
     {:else if activeTab === 'trees'}
       <PhylogeneticTrees />
     {:else if activeTab === 'public-clones'}

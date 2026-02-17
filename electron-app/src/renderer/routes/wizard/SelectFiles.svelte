@@ -30,7 +30,8 @@
           ...s,
           fastaDir: result.path,
           fastaFiles: result.files,
-          fastaCount: result.fileCount
+          fastaCount: result.fileCount,
+          detectedStructure: result.detectedStructure ?? null
         }));
       } else {
         console.log('User cancelled or no directory selected');
@@ -127,8 +128,42 @@
       {/if}
     </div>
     
-    <!-- File list preview -->
-    {#if $wizardState.fastaFiles.length > 0}
+    <!-- Detected folder structure -->
+    {#if $wizardState.detectedStructure}
+      <div class="structure-preview">
+        <div class="preview-header">
+          <span class="preview-title">
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none" style="display:inline;vertical-align:-2px;margin-right:4px">
+              <path d="M1 3a1 1 0 011-1h3l1.5 1.5H12a1 1 0 011 1V11a1 1 0 01-1 1H2a1 1 0 01-1-1V3z" stroke="currentColor" stroke-width="1.2"/>
+            </svg>
+            Folder structure detected
+          </span>
+          <span class="preview-count">{$wizardState.detectedStructure.groups.length} group{$wizardState.detectedStructure.groups.length !== 1 ? 's' : ''}</span>
+        </div>
+        <div class="structure-tree">
+          {#each $wizardState.detectedStructure.groups as group}
+            <div class="tree-group">
+              <div class="tree-group-name">
+                <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+                  <rect x="1" y="2.5" width="10" height="8" rx="1" stroke="currentColor" stroke-width="1.2"/>
+                  <path d="M1 5h10" stroke="currentColor" stroke-width="1.2"/>
+                  <path d="M1 4a1 1 0 011-1h3l1 1.5h5a1 1 0 011 1" stroke="currentColor" stroke-width="1"/>
+                </svg>
+                <strong>{group.name}</strong>
+              </div>
+              {#each group.timepoints as tp}
+                <div class="tree-timepoint">
+                  <span class="tp-label">{tp.label}</span>
+                  <span class="tp-count">{tp.files.length} file{tp.files.length !== 1 ? 's' : ''}</span>
+                </div>
+              {/each}
+            </div>
+          {/each}
+        </div>
+        <p class="structure-hint">This structure will be used to auto-populate the Organize tab after analysis.</p>
+      </div>
+    {:else if $wizardState.fastaFiles.length > 0}
+      <!-- Flat file list preview -->
       <div class="file-preview">
         <div class="preview-header">
           <span class="preview-title">Files to process</span>
@@ -355,6 +390,73 @@
   }
   
   .file-item.more {
+    color: var(--text-tertiary);
+    font-style: italic;
+  }
+
+  /* Detected folder structure */
+  .structure-preview {
+    background: var(--surface-raised);
+    border: 1px solid var(--color-primary-muted);
+    border-radius: var(--border-radius-lg);
+    overflow: hidden;
+  }
+
+  .structure-tree {
+    padding: var(--space-3) var(--space-4);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    max-height: 220px;
+    overflow-y: auto;
+  }
+
+  .tree-group {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .tree-group-name {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    font-size: var(--text-sm);
+    color: var(--text-primary);
+  }
+
+  .tree-group-name svg {
+    color: var(--color-primary);
+    flex-shrink: 0;
+  }
+
+  .tree-timepoint {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding-left: calc(12px + var(--space-2) + var(--space-3));
+    font-size: var(--text-xs);
+    color: var(--text-secondary);
+  }
+
+  .tree-timepoint::before {
+    content: '└';
+    color: var(--gray-400);
+    font-family: monospace;
+  }
+
+  .tp-label {
+    font-weight: var(--font-medium);
+  }
+
+  .tp-count {
+    color: var(--text-tertiary);
+  }
+
+  .structure-hint {
+    padding: var(--space-2) var(--space-4) var(--space-3);
+    margin: 0;
+    font-size: var(--text-xs);
     color: var(--text-tertiary);
     font-style: italic;
   }

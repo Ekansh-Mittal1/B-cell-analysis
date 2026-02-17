@@ -4,7 +4,7 @@
  * Svelte stores for managing application state
  */
 
-import { writable, derived, type Writable, type Readable } from 'svelte/store';
+import { writable, derived, get, type Writable, type Readable } from 'svelte/store';
 
 // ============================================
 // Types
@@ -13,20 +13,26 @@ import { writable, derived, type Writable, type Readable } from 'svelte/store';
 export type AppView = 'wizard' | 'results';
 export type WizardStep = 1 | 2 | 3;
 
-export interface WizardState {
-  step: WizardStep;
+export interface WizardTimepoint {
+  id: string;
+  label: string;
   fastaDir: string | null;
   fastaFiles: string[];
-  fastaCount: number;
+}
+
+export interface WizardState {
+  step: WizardStep;
+  studyName: string;
+  timepoints: WizardTimepoint[];
   cleanFasta: boolean;
   databaseType: 'IMGT' | 'Custom';
   customDatabaseV: string | null;
   customDatabaseD: string | null;
   customDatabaseJ: string | null;
-  cloneMode: 'allele' | 'gene';  // V/J gene matching: allele (strict) or gene (permissive)
-  linkageMethod: 'single' | 'average' | 'complete';  // Clustering linkage method
-  runCovidMatching: boolean;  // Enable COVID database matching
-  covAbdabPath: string | null;  // Path to CoV-AbDab CSV file
+  cloneMode: 'allele' | 'gene';
+  linkageMethod: 'single' | 'average' | 'complete';
+  runCovidMatching: boolean;
+  covAbdabPath: string | null;
 }
 
 export interface AnalysisProgress {
@@ -54,12 +60,14 @@ export interface SequenceData {
   cdr3_dna: string | null;
   cdr3_peptide: string | null;
   somatic_mutations: number | null;
-  isotype: string | null;
+  isotype: string | null;   // Chain type: Heavy, Kappa, Lambda
+  c_call?: string | null;   // Constant region for Ig class: IGHM, IGHG1, IGHA1, etc.
   clone_id?: number;
   clone_count?: number;
   productive?: boolean;
-  dna_sequence?: string | null;  // Full DNA sequence for debugging
-  aa_sequence?: string | null;   // Translated AA sequence (V-J region) for debugging
+  dna_sequence?: string | null;
+  aa_sequence?: string | null;
+  lineage_id?: number | null;  // Cross-timepoint lineage identifier
 }
 
 export interface FileGroup {
@@ -90,7 +98,12 @@ export interface VisualizationData {
     clones: string[];
     patients: string[];
     matrix: number[][];
+    /** Normalized frequencies (% of patient repertoire) */
     frequencies: number[][];
+    /** Raw sequence counts (for tooltips) */
+    rawCounts?: number[][];
+    /** Total sequences per patient (for normalization context) */
+    patientTotals?: number[];
   };
   chord: {
     nodes: string[];
@@ -175,6 +188,11 @@ export interface TreeMetadata {
   path: string;
   clone_id: number | null;
   clone_size: number;
+  timepoint?: string;  // e.g. "T1", "T2" - set when trees are built per timepoint
+}
+
+export interface TimepointMapping {
+  [stagedFilename: string]: { timepoint: string; originalFile: string };
 }
 
 export interface ResultsState {
@@ -189,6 +207,8 @@ export interface ResultsState {
   outputDir: string | null;
   /** Mapping of numeric file ID (e.g. "1001") to original filename */
   fileIdMapping: Record<string, string>;
+  /** Mapping of staged filename to timepoint label + original file */
+  timepointMapping: TimepointMapping;
   publicClonesData: PublicClonesData | null;
   isAnalyzingPublicClones: boolean;
   covidMatchData: CovidMatchData | null;
@@ -198,10 +218,11 @@ export interface ResultsState {
 export interface AnalysisState {
   isRunning: boolean;
   isSessionLoad: boolean;  // True when loading a previous session (not a real pipeline run)
+  pendingLoadOutputDir: string | null;  // When loading a session, the outputDir we expect; ignore results for other dirs
   progress: AnalysisProgress | null;
   logs: LogEntry[];
   error: string | null;
-  thresholdRequest: number | null;
+  thresholdRequest: number | { label: string; calculated: number }[] | null;
 }
 
 // ============================================
@@ -215,6 +236,8 @@ export interface SessionEntry {
   date: string;        // ISO 8601 timestamp
   fileCount: number;
   fastaDir: string;
+  studyName?: string;
+  studyDesign?: StudyDesign;
 }
 
 const SESSIONS_KEY = 'bcr_sessions';
@@ -260,6 +283,114 @@ export function renameSession(id: string, newName: string): void {
   }
 }
 
+/** Update the study design for a session matching the given outputDir. Called when user edits design. */
+export function updateSessionStudyDesign(outputDir: string, design: StudyDesign): void {
+  const sessions = getSessions();
+  const session = sessions.find(s => s.outputDir === outputDir);
+  if (session) {
+    session.studyDesign = design;
+    localStorage.setItem(SESSIONS_KEY, JSON.stringify(sessions));
+  }
+}
+
+
+// ============================================
+// Study Design (Data Organizer)
+// ============================================
+
+export interface StudyTimepoint {
+  id: string;
+  label: string;
+  order: number;
+  files: string[];
+}
+
+export interface StudyGroup {
+  id: string;
+  name: string;
+  color: string;
+  timepoints: StudyTimepoint[];
+}
+
+export interface StudyDesign {
+  groups: StudyGroup[];
+  unassigned: string[];
+}
+
+export const GROUP_COLORS = [
+  '#0066CC', '#E85D04', '#2D9F3F', '#9B59B6',
+  '#E74C3C', '#00ACC1', '#F39C12', '#7F8C8D'
+];
+
+export const studyDesign: Writable<StudyDesign> = writable({
+  groups: [],
+  unassigned: []
+});
+
+let _saveTimeout: ReturnType<typeof setTimeout> | null = null;
+
+export async function saveStudyDesign(design: StudyDesign): Promise<void> {
+  return saveStudyDesignImmediate(design);
+}
+
+/** Immediately flush study design to disk (no debounce). Used on component destroy. */
+export async function saveStudyDesignImmediate(design: StudyDesign): Promise<void> {
+  const outputDir = get(resultsState).outputDir;
+  if (!outputDir) {
+    console.warn('[StudyDesign] saveStudyDesignImmediate: no outputDir, skipping');
+    return;
+  }
+  return saveStudyDesignToOutputDir(outputDir, design);
+}
+
+/** Save study design to a specific output dir. Use when switching sessions - pass the dir we're leaving. */
+export async function saveStudyDesignToOutputDir(outputDir: string | null, design: StudyDesign): Promise<void> {
+  if (_saveTimeout) clearTimeout(_saveTimeout);
+  if (!outputDir) {
+    console.warn('[StudyDesign] saveStudyDesignToOutputDir: no outputDir, skipping');
+    return;
+  }
+  const filePath = outputDir + '/study_design.json';
+  try {
+    if (window.electronAPI) {
+      const content = JSON.stringify(design, null, 2);
+      console.log('[StudyDesign] Saving to', filePath, '- groups:', design.groups.length, 'unassigned:', design.unassigned?.length ?? 0);
+      const result = await window.electronAPI.writeFile(filePath, content);
+      if (result && !result.success) {
+        console.error('[StudyDesign] writeFile FAILED:', result.error);
+      } else {
+        console.log('[StudyDesign] Saved OK to', filePath);
+        updateSessionStudyDesign(outputDir, design);
+      }
+    }
+  } catch (e) {
+    console.error('[StudyDesign] Failed to save:', e);
+  }
+}
+
+export async function loadStudyDesign(): Promise<StudyDesign | null> {
+  try {
+    const outputDir = get(resultsState).outputDir;
+    if (!outputDir || !window.electronAPI) {
+      console.log('[StudyDesign] loadStudyDesign: no outputDir or no electronAPI');
+      return null;
+    }
+    const filePath = outputDir + '/study_design.json';
+    console.log('[StudyDesign] Loading from', filePath);
+    const result = await window.electronAPI.readFile(filePath);
+    if (result.success && result.content) {
+      const parsed = JSON.parse(result.content);
+      console.log('[StudyDesign] Loaded OK:', parsed?.groups?.length ?? 0, 'groups');
+      return parsed;
+    } else {
+      console.log('[StudyDesign] File not found or empty:', filePath, result);
+    }
+  } catch (e) {
+    console.warn('[StudyDesign] Failed to load:', e);
+  }
+  return null;
+}
+
 
 // ============================================
 // Stores
@@ -271,16 +402,15 @@ export const currentView: Writable<AppView> = writable('wizard');
 // Wizard state
 export const wizardState: Writable<WizardState> = writable({
   step: 1,
-  fastaDir: null,
-  fastaFiles: [],
-  fastaCount: 0,
+  studyName: '',
+  timepoints: [],
   cleanFasta: false,
   databaseType: 'IMGT',
   customDatabaseV: null,
   customDatabaseD: null,
   customDatabaseJ: null,
-  cloneMode: 'allele',  // Default: strict allele matching
-  linkageMethod: 'average',  // Default: average linkage
+  cloneMode: 'allele',
+  linkageMethod: 'average',
   runCovidMatching: false,
   covAbdabPath: null
 });
@@ -289,6 +419,7 @@ export const wizardState: Writable<WizardState> = writable({
 export const analysisState: Writable<AnalysisState> = writable({
   isRunning: false,
   isSessionLoad: false,
+  pendingLoadOutputDir: null,
   progress: null,
   logs: [],
   error: null,
@@ -307,6 +438,7 @@ export const resultsState: Writable<ResultsState> = writable({
   treeMetadata: [],
   outputDir: null,
   fileIdMapping: {},
+  timepointMapping: {},
   publicClonesData: null,
   isAnalyzingPublicClones: false,
   covidMatchData: null,
@@ -319,9 +451,10 @@ export const resultsState: Writable<ResultsState> = writable({
 // ============================================
 
 // Can proceed to next wizard step
+// Step 1: must have study name and at least 1 timepoint with files
 export const canProceedStep1: Readable<boolean> = derived(
   wizardState,
-  ($state) => $state.fastaDir !== null && $state.fastaCount > 0
+  ($state) => $state.studyName.trim().length > 0 && $state.timepoints.length > 0 && $state.timepoints.every(tp => tp.fastaFiles.length > 0)
 );
 
 export const canProceedStep2: Readable<boolean> = derived(
@@ -455,9 +588,8 @@ export const filteredDlFileGroups: Readable<FileGroup[]> = derived(
 export function resetWizard(): void {
   wizardState.set({
     step: 1,
-    fastaDir: null,
-    fastaFiles: [],
-    fastaCount: 0,
+    studyName: '',
+    timepoints: [],
     cleanFasta: false,
     databaseType: 'IMGT',
     customDatabaseV: null,
@@ -474,6 +606,7 @@ export function resetAnalysis(): void {
   analysisState.set({
     isRunning: false,
     isSessionLoad: false,
+    pendingLoadOutputDir: null,
     progress: null,
     logs: [],
     error: null,
@@ -561,14 +694,15 @@ function groupSequencesByClone(sequences: SequenceData[]): CloneGroup[] {
 
 export function processSequenceResults(data: {
   sequences: SequenceData[];
-  file_groups: Record<string, SequenceData[]>;
+  file_groups?: Record<string, SequenceData[]>;
   output_dir?: string;
   file_id_mapping?: Record<string, string>;
 }): void {
-  const fileGroups: FileGroup[] = Object.entries(data.file_groups).map(([filename, sequences]) => ({
+  const fileGroupsMap = data.file_groups && typeof data.file_groups === 'object' ? data.file_groups : {};
+  const fileGroups: FileGroup[] = Object.entries(fileGroupsMap).map(([filename, sequences]) => ({
     filename,
-    sequences,
-    cloneGroups: groupSequencesByClone(sequences),
+    sequences: Array.isArray(sequences) ? sequences : [],
+    cloneGroups: groupSequencesByClone(Array.isArray(sequences) ? sequences : []),
     expanded: true
   }));
   

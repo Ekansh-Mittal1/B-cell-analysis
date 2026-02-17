@@ -22,6 +22,7 @@ interface PipelineConfig {
   database_v?: string;
   database_d?: string;
   database_j?: string;
+  database_c?: string;  // Optional C gene for isotype (IgG/IgM/etc.)
   output_dir?: string;
   clone_mode?: 'allele' | 'gene';  // V/J gene matching: allele (strict) or gene (permissive)
   linkage_method?: 'single' | 'average' | 'complete';  // Clustering linkage method
@@ -33,7 +34,7 @@ interface RunCallbacks {
   onProgress: (data: { stage: string; percent: number; message: string }) => void;
   onLog: (data: { level: string; message: string }) => void;
   onResult: (data: { artifact: string; path?: string; data?: any }) => void;
-  onThresholdRequest: (data: { calculated: number }) => void;
+  onThresholdRequest: (data: { calculated: number; timepoint_thresholds?: { label: string; calculated: number }[] }) => void;
   onComplete: (data: { success: boolean; error?: string }) => void;
   onError: (error: Error) => void;
 }
@@ -173,7 +174,8 @@ export class BackendRunner {
         case 'threshold_request':
           console.log('[BackendRunner] Received threshold_request message:', message);
           callbacks.onThresholdRequest({
-            calculated: message.calculated
+            calculated: message.calculated ?? 0,
+            timepoint_thresholds: message.timepoint_thresholds
           });
           break;
           
@@ -196,13 +198,23 @@ export class BackendRunner {
   /**
    * Send threshold response to the backend
    */
-  sendThresholdResponse(value: number): void {
+  sendThresholdResponse(value: number | Record<string, number>): void {
     console.log('[BackendRunner] Sending threshold response:', value);
     if (this.process?.stdin && !this.process.stdin.destroyed) {
-      const response = JSON.stringify({
-        type: 'threshold_response',
-        value
-      });
+      let response: string;
+      if (typeof value === 'object' && value !== null) {
+        // Multi-timepoint: {thresholds: {T1: 0.12, T2: 0.15, ...}}
+        response = JSON.stringify({
+          type: 'threshold_response',
+          thresholds: value
+        });
+      } else {
+        // Single value (legacy)
+        response = JSON.stringify({
+          type: 'threshold_response',
+          value
+        });
+      }
       console.log('[BackendRunner] Writing to stdin:', response);
       this.process.stdin.write(response + '\n', (err) => {
         if (err) {
@@ -220,12 +232,14 @@ export class BackendRunner {
    * Load results from disk (restore after app sleep/minimize)
    */
   runLoadResults(outputDir: string, callbacks: RunCallbacks): void {
+    this.cleanup(); // Ensure no previous process is running
     const pipelineScript = path.join(this.options.backendDir, 'pipeline_runner.py');
     
     const env = {
       ...process.env,
       PATH: `${this.options.binDir}:${process.env.PATH}`,
-      IGDATA: this.options.dataDir
+      IGDATA: this.options.dataDir,
+      PYTHONUNBUFFERED: '1'  // Ensure Python flushes stdout immediately
     };
 
     this.process = spawn(this.options.pythonPath!, [pipelineScript], {
@@ -377,9 +391,6 @@ export class BackendRunner {
   cancel(): void {
     console.log('[BackendRunner] Cancel requested');
     
-    // Clear callbacks immediately to prevent race conditions
-    this.runCallbacks = null;
-    
     if (this.process) {
       // Send cancel message to backend
       try {
@@ -411,14 +422,21 @@ export class BackendRunner {
   }
 
   /**
-   * Clean up resources
+   * Clean up resources and kill any running process (e.g. load_results).
+   * Prevents stale results from overwriting a newly requested session.
    */
   private cleanup(): void {
     if (this.rl) {
       this.rl.close();
       this.rl = null;
     }
-    this.process = null;
+    if (this.process) {
+      const pid = this.process.pid;
+      try {
+        if (pid) process.kill(pid, 'SIGKILL');
+      } catch (_) { /* process may already be dead */ }
+      this.process = null;
+    }
   }
 
   /**

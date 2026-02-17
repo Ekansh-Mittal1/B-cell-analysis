@@ -3,7 +3,12 @@
     clones: string[];
     patients: string[];
     matrix: number[][];
+    /** Normalized frequencies (% of patient repertoire) */
     frequencies: number[][];
+    /** Raw sequence counts (for tooltips) */
+    rawCounts?: number[][];
+    /** Total sequences per patient */
+    patientTotals?: number[];
   };
 
   export let onCloneClick: (cloneIndex: number) => void = () => {};
@@ -13,22 +18,40 @@
   // Dimensions
   const cellSize = 30;
   const labelWidth = 150;
-  const labelHeight = 150; // Space for rotated patient labels
+  const labelHeight = 150;
   const padding = 10;
-  const topPadding = 60; // Extra padding at the very top for rotated labels
-  const rightPadding = 120; // Extra padding on the right for rotated labels
+  const topPadding = 60;
+  const rightPadding = 120;
 
   $: width = labelWidth + data.patients.length * cellSize + padding * 2 + rightPadding;
   $: height = topPadding + labelHeight + data.clones.length * cellSize + padding * 2;
 
-  // Color scale for frequency
+  $: hasRawCounts = data.rawCounts && data.rawCounts.length > 0;
+  $: isNormalized = hasRawCounts;
+
+  // Color scale based on frequency
   function getColor(value: number): string {
     if (value === 0) return '#f0f0f0';
-    // Blue scale: light to dark based on frequency
     const maxFreq = Math.max(...data.frequencies.flat());
+    if (maxFreq === 0) return '#f0f0f0';
     const intensity = Math.min(value / maxFreq, 1);
-    const blue = Math.floor(255 - intensity * 155); // 255 to 100
+    const blue = Math.floor(255 - intensity * 155);
     return `rgb(${blue}, ${blue + 20}, 255)`;
+  }
+
+  function formatFreq(val: number): string {
+    if (val === 0) return '';
+    if (val >= 10) return val.toFixed(0) + '%';
+    if (val >= 1) return val.toFixed(1) + '%';
+    return val.toFixed(2) + '%';
+  }
+
+  function getRawCount(row: number, col: number): number {
+    return data.rawCounts?.[row]?.[col] ?? 0;
+  }
+
+  function getPatientTotal(col: number): number {
+    return data.patientTotals?.[col] ?? 0;
   }
 
   function handleCellClick(row: number) {
@@ -37,6 +60,12 @@
 </script>
 
 <div class="heatmap-container">
+  {#if isNormalized}
+    <div class="norm-note">
+      Values show clone frequency (% of patient repertoire), normalized for sequencing depth.
+    </div>
+  {/if}
+
   <svg {width} {height}>
     <g transform="translate(0, {topPadding})">
     <!-- Y-axis labels (clones) -->
@@ -86,7 +115,7 @@
           on:click={() => handleCellClick(i)}
         />
         
-        <!-- Show count if present -->
+        <!-- Show frequency % if present -->
         {#if data.frequencies[i][j] > 0}
           <text
             x={labelWidth + j * cellSize + cellSize / 2}
@@ -95,7 +124,7 @@
             dominant-baseline="middle"
             class="count-label"
           >
-            {data.frequencies[i][j]}
+            {isNormalized ? formatFreq(data.frequencies[i][j]) : data.frequencies[i][j]}
           </text>
         {/if}
       {/each}
@@ -108,7 +137,12 @@
     <div class="tooltip" style="left: {labelWidth + hoveredCell.col * cellSize + cellSize/2}px; top: {topPadding + labelHeight + hoveredCell.row * cellSize - 5}px;">
       <div><strong>Clone:</strong> {data.clones[hoveredCell.row]}</div>
       <div><strong>Patient:</strong> {data.patients[hoveredCell.col]}</div>
-      <div><strong>Sequences:</strong> {data.frequencies[hoveredCell.row][hoveredCell.col]}</div>
+      {#if isNormalized}
+        <div><strong>Frequency:</strong> {formatFreq(data.frequencies[hoveredCell.row][hoveredCell.col])}</div>
+        <div><strong>Sequences:</strong> {getRawCount(hoveredCell.row, hoveredCell.col)} / {getPatientTotal(hoveredCell.col)} total</div>
+      {:else}
+        <div><strong>Sequences:</strong> {data.frequencies[hoveredCell.row][hoveredCell.col]}</div>
+      {/if}
     </div>
   {/if}
 </div>
@@ -121,6 +155,14 @@
     flex: 1;
     min-height: 0;
     width: 100%;
+  }
+
+  .norm-note {
+    font-size: 11px;
+    color: var(--text-tertiary, #6B7280);
+    padding: 6px 12px;
+    background: var(--gray-50, #FAFBFC);
+    border-bottom: 1px solid var(--border-light, #E8EAED);
   }
 
   .label {
@@ -150,7 +192,7 @@
   }
 
   .count-label {
-    font-size: 10px;
+    font-size: 9px;
     fill: #333;
     pointer-events: none;
     font-weight: var(--font-semibold);
@@ -173,4 +215,3 @@
     margin: 2px 0;
   }
 </style>
-

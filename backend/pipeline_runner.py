@@ -127,6 +127,7 @@ class PipelineRunner:
         self.database_v = config.get('database_v', '')
         self.database_d = config.get('database_d', '')
         self.database_j = config.get('database_j', '')
+        self.database_c = config.get('database_c', '')  # Optional: for isotype (IgG/IgM/etc.)
         self.output_dir = config.get('output_dir', '')
         self.backend_dir = config.get('backend_dir', backend_dir)
         
@@ -166,6 +167,8 @@ class PipelineRunner:
         self.combined_fasta: Optional[str] = None
         self.file_id_mapping: Dict[str, str] = {}   # numeric_id -> filename
         self.filename_to_id: Dict[str, str] = {}    # filename -> numeric_id
+        self.timepoint_mapping: Dict[str, Dict[str, str]] = {}  # staged_filename -> {timepoint, originalFile}
+        self.timepoint_labels: List[str] = []  # ordered list of timepoint labels
         self.cancelled = False
     
     def _ensure_file_id_mapping(self):
@@ -293,6 +296,21 @@ class PipelineRunner:
             self.database_v = os.path.join(imgt_dir, 'Human_V.fasta')
             self.database_d = os.path.join(imgt_dir, 'Human_D.fasta')
             self.database_j = os.path.join(imgt_dir, 'Human_J.fasta')
+            # C gene for isotype: use config, or default IMGT path, or common external paths
+            if not self.database_c:
+                candidates = [
+                    os.path.join(imgt_dir, 'Human_C.fasta'),
+                    os.path.expanduser('~/share/germlines/imgt/human/constant/imgt_human_IGHC.fasta'),
+                    '/Users/teichmann/share/germlines/imgt/human/constant/imgt_human_IGHC.fasta',
+                ]
+                for p in candidates:
+                    if p and os.path.exists(p):
+                        self.database_c = p
+                        break
+                else:
+                    self.database_c = ''
+            if self.database_c:
+                self.emit.log("info", f"Using C gene database for isotype: {self.database_c}")
         
         # Verify databases exist
         for db_name, db_path in [('V', self.database_v), ('D', self.database_d), ('J', self.database_j)]:
@@ -325,6 +343,43 @@ class PipelineRunner:
         jname = os.path.basename(self.database_j)
         self.database_j_clean = os.path.join(clean_db_dir, jname.replace('.fasta', '_clean.fasta'))
         cl.clean_imgt(self.database_j, self.database_j_clean)
+        
+        # Clean C database (optional, for isotype annotation)
+        if self.database_c and os.path.exists(self.database_c):
+            try:
+                cname = os.path.basename(self.database_c)
+                raw_clean = os.path.join(clean_db_dir, cname.replace('.fasta', '_clean_raw.fasta'))
+                self.database_c_clean = os.path.join(clean_db_dir, cname.replace('.fasta', '_clean.fasta'))
+                cl.clean_imgt(self.database_c, raw_clean)
+                
+                # Deduplicate: IMGT C gene files have multiple entries per allele
+                # (membrane vs secreted isoforms).  makeblastdb -parse_seqids
+                # fails on duplicate sequence IDs, so keep only the first entry
+                # per allele name.
+                from Bio import SeqIO
+                seen_ids = set()
+                kept = 0
+                skipped = 0
+                with open(self.database_c_clean, 'w') as out_f:
+                    for record in SeqIO.parse(raw_clean, 'fasta'):
+                        if record.id not in seen_ids:
+                            seen_ids.add(record.id)
+                            SeqIO.write(record, out_f, 'fasta')
+                            kept += 1
+                        else:
+                            skipped += 1
+                self.emit.log("info", f"C gene database: kept {kept} unique alleles, removed {skipped} duplicate entries")
+                
+                # Remove temp file
+                try:
+                    os.remove(raw_clean)
+                except:
+                    pass
+            except Exception as e:
+                self.emit.log("warn", f"C gene cleaning failed, isotype will be unavailable: {e}")
+                self.database_c_clean = None
+        else:
+            self.database_c_clean = None
         
         self.emit.log("info", "Database files cleaned and ready")
         return True
@@ -364,6 +419,85 @@ class PipelineRunner:
         self.emit.log("info", f"File ID mapping: {self.file_id_mapping}")
         return True
     
+    def load_timepoint_mapping(self) -> bool:
+        """Load timepoint_mapping.json if present in the output or staging directory."""
+        tp_path = os.path.join(self.output_dir, 'timepoint_mapping.json')
+        if not os.path.exists(tp_path):
+            # Try staging dir (fasta_dir)
+            tp_path = os.path.join(self.fasta_dir, 'timepoint_mapping.json')
+        
+        if os.path.exists(tp_path):
+            with open(tp_path, 'r') as f:
+                self.timepoint_mapping = json.load(f)
+            # Build ordered list of unique timepoint labels (preserving insertion order)
+            seen = set()
+            self.timepoint_labels = []
+            for entry in self.timepoint_mapping.values():
+                tp = entry['timepoint']
+                if tp not in seen:
+                    seen.add(tp)
+                    self.timepoint_labels.append(tp)
+            self.emit.log("info", f"Loaded timepoint mapping: {len(self.timepoint_mapping)} files across {len(self.timepoint_labels)} timepoints: {self.timepoint_labels}")
+            return True
+        else:
+            self.emit.log("info", "No timepoint_mapping.json found, running single-cohort mode")
+            return False
+    
+    def split_db_pass_by_timepoint(self) -> Dict[str, str]:
+        """Split the global db-pass TSV by timepoint.
+        
+        Returns dict of tp_label -> path to per-timepoint db-pass TSV.
+        """
+        import pandas as pd
+        
+        self._ensure_file_id_mapping()
+        
+        db_pass_path = os.path.join(self.output_dir, "ig_out_data_db-pass.tsv")
+        if not os.path.exists(db_pass_path):
+            self.emit.log("error", "db-pass.tsv not found for splitting")
+            return {}
+        
+        df = pd.read_table(db_pass_path)
+        self.emit.log("info", f"Splitting {len(df)} sequences from db-pass.tsv by timepoint")
+        
+        # Build numeric_id -> timepoint mapping
+        id_to_tp = {}
+        for num_id, filename in self.file_id_mapping.items():
+            if filename in self.timepoint_mapping:
+                id_to_tp[num_id] = self.timepoint_mapping[filename]['timepoint']
+            else:
+                self.emit.log("warn", f"File {filename} (id={num_id}) not found in timepoint mapping")
+        
+        # Assign timepoint to each row based on sequence_id suffix
+        def get_timepoint(seq_id):
+            parts = str(seq_id).rsplit('_', 1)
+            if len(parts) == 2 and parts[1] in id_to_tp:
+                return id_to_tp[parts[1]]
+            return None
+        
+        df['_timepoint'] = df['sequence_id'].apply(get_timepoint)
+        
+        per_tp_dir = os.path.join(self.output_dir, 'per_timepoint')
+        os.makedirs(per_tp_dir, exist_ok=True)
+        
+        tp_paths = {}
+        for tp_label in self.timepoint_labels:
+            tp_dir = os.path.join(per_tp_dir, tp_label)
+            os.makedirs(tp_dir, exist_ok=True)
+            
+            tp_df = df[df['_timepoint'] == tp_label].drop(columns=['_timepoint'])
+            tp_path = os.path.join(tp_dir, 'db-pass.tsv')
+            tp_df.to_csv(tp_path, sep='\t', index=False)
+            tp_paths[tp_label] = tp_path
+            self.emit.log("info", f"  {tp_label}: {len(tp_df)} sequences -> {tp_path}")
+        
+        # Log any unmapped sequences
+        unmapped = df[df['_timepoint'].isna()]
+        if len(unmapped) > 0:
+            self.emit.log("warn", f"  {len(unmapped)} sequences could not be mapped to a timepoint")
+        
+        return tp_paths
+    
     def build_blast_databases(self) -> bool:
         """Build BLAST databases from cleaned database files."""
         self.emit.progress("blast_db", 20, "Building BLAST databases...")
@@ -386,6 +520,18 @@ class PipelineRunner:
             
             # Store the database path for later use
             setattr(self, f'igblast_db_{db_type.lower()}', db_out)
+        
+        # Build C gene BLAST database if available
+        if getattr(self, 'database_c_clean', None) and os.path.exists(self.database_c_clean):
+            cname = os.path.basename(self.database_c_clean)
+            db_out = os.path.join(db_files_dir, cname)
+            cmd = f"{makeblastdb_path} -parse_seqids -dbtype nucl -in {self.database_c_clean} -out {db_out}"
+            result = os.system(cmd)
+            if result != 0:
+                self.emit.log("warn", "makeblastdb for C returned non-zero exit code")
+            else:
+                self.igblast_db_c = db_out
+                self.emit.log("info", "C gene BLAST database built for isotype annotation")
         
         self.emit.log("info", "BLAST databases built successfully")
         return True
@@ -419,46 +565,71 @@ class PipelineRunner:
             self.emit.log("error", f"IgBLAST failed: {str(e)}")
             return False
     
-    def calculate_threshold(self) -> Optional[float]:
-        """Calculate distance threshold using R script."""
+    def calculate_thresholds(self) -> Optional[Dict[str, float]]:
+        """Calculate distance thresholds - per timepoint if mapping available, else single global.
+        
+        Returns dict of tp_label -> threshold, or {'_global': threshold} for single-cohort mode.
+        """
         self.emit.progress("threshold", 35, "Calculating distance threshold...")
         
         try:
-            # Run MakeDb first
+            # Run MakeDb first (global)
             fmt7_path = os.path.join(self.output_dir, "ig_out_data.fmt7")
             db_pass_path = os.path.join(self.output_dir, "ig_out_data_db-pass.tsv")
             
-            # Update outs_dir in clonalityFunctions to use our output_dir
             import utils.clonalityFunctions as clonalityFunctions
-            # Temporarily update the global outs_dir
             original_outs_dir = clonalityFunctions.outs_dir
             clonalityFunctions.outs_dir = self.output_dir
             
             try:
                 make_db(fmt7_path, self.database_j, self.database_v, self.database_d, self.combined_fasta)
-                
-                # Calculate distribution using R script
-                script_path = os.path.join(self.backend_dir, 'scripts', 'calculateDistribution.R')
-                plot_path = os.path.join(self.output_dir, 'distributionPlot.png')
-                calculated_dist = findDist(db_pass_path, pathToScript=script_path, pathToPlot=plot_path)
             finally:
-                # Restore original outs_dir
                 clonalityFunctions.outs_dir = original_outs_dir
             
-            disttonearest_path = os.path.join(self.output_dir, 'disttonearest.tsv')
-            if os.path.exists(disttonearest_path):
-                self.emit.log("info", f"Distance-to-nearest data saved to disttonearest.tsv")
-            self.emit.log("info", f"Calculated distance threshold: {calculated_dist}")
+            script_path = os.path.join(self.backend_dir, 'scripts', 'calculateDistribution.R')
             
-            # Request user confirmation
-            self.emit.threshold_request(calculated_dist)
-            self.emit.log("info", f"Waiting for threshold response from user (calculated: {calculated_dist})")
+            # Per-timepoint mode
+            if self.timepoint_labels:
+                self.emit.log("info", f"Calculating thresholds per timepoint: {self.timepoint_labels}")
+                tp_paths = self.split_db_pass_by_timepoint()
+                
+                timepoint_thresholds = []
+                for tp_label in self.timepoint_labels:
+                    tp_db_path = tp_paths.get(tp_label)
+                    if not tp_db_path or not os.path.exists(tp_db_path):
+                        self.emit.log("warn", f"No db-pass for timepoint {tp_label}, using default 0.1")
+                        timepoint_thresholds.append({"label": tp_label, "calculated": 0.1})
+                        continue
+                    
+                    tp_dir = os.path.dirname(tp_db_path)
+                    plot_path = os.path.join(tp_dir, 'distributionPlot.png')
+                    
+                    self.emit.progress("threshold", 35, f"Calculating threshold for {tp_label}...")
+                    calculated_dist = findDist(tp_db_path, pathToScript=script_path, pathToPlot=plot_path)
+                    self.emit.log("info", f"  {tp_label}: calculated threshold = {calculated_dist}")
+                    timepoint_thresholds.append({"label": tp_label, "calculated": calculated_dist})
+                
+                # Emit batched threshold request
+                NDJSONEmitter.emit({
+                    "type": "threshold_request",
+                    "timepoint_thresholds": timepoint_thresholds
+                })
+            else:
+                # Single-cohort mode (backward compat)
+                plot_path = os.path.join(self.output_dir, 'distributionPlot.png')
+                calculated_dist = findDist(db_pass_path, pathToScript=script_path, pathToPlot=plot_path)
+                self.emit.log("info", f"Calculated distance threshold: {calculated_dist}")
+                
+                NDJSONEmitter.emit({
+                    "type": "threshold_request",
+                    "calculated": calculated_dist,
+                    "timepoint_thresholds": [{"label": "_global", "calculated": calculated_dist}]
+                })
             
-            # Flush stdout to ensure the request is sent
+            self.emit.log("info", "Waiting for threshold response from user...")
             sys.stdout.flush()
             
             # Wait for response from stdin
-            # Note: This will block until a line is received
             try:
                 response_line = sys.stdin.readline()
                 self.emit.log("debug", f"Received line from stdin: {response_line[:100] if response_line else 'None'}")
@@ -471,9 +642,16 @@ class PipelineRunner:
                     response = json.loads(response_line.strip())
                     self.emit.log("info", f"Parsed threshold response: {response}")
                     if response.get('type') == 'threshold_response':
-                        threshold_value = float(response.get('value', calculated_dist))
-                        self.emit.log("info", f"Using threshold value: {threshold_value}")
-                        return threshold_value
+                        # New format: {thresholds: {T1: 0.12, T2: 0.15, ...}}
+                        if 'thresholds' in response:
+                            thresholds = {k: float(v) for k, v in response['thresholds'].items()}
+                            self.emit.log("info", f"Using per-timepoint thresholds: {thresholds}")
+                            return thresholds
+                        # Legacy format: {value: 0.12}
+                        elif 'value' in response:
+                            val = float(response['value'])
+                            self.emit.log("info", f"Using single threshold value: {val}")
+                            return {'_global': val}
                     elif response.get('type') == 'cancel':
                         self.cancelled = True
                         self.emit.log("info", "User cancelled threshold confirmation")
@@ -481,51 +659,503 @@ class PipelineRunner:
                 except json.JSONDecodeError as e:
                     self.emit.log("warn", f"Failed to parse threshold response JSON: {response_line[:100]}, error: {str(e)}")
             
-            # If no response or invalid response, use calculated value
-            self.emit.log("info", f"No valid threshold response received, using calculated value: {calculated_dist}")
-            return calculated_dist
+            # Fallback: use calculated values
+            if self.timepoint_labels:
+                fallback = {}
+                for item in timepoint_thresholds:
+                    fallback[item['label']] = item['calculated']
+                self.emit.log("info", f"No valid response, using calculated thresholds: {fallback}")
+                return fallback
+            else:
+                self.emit.log("info", f"No valid response, using calculated threshold: {calculated_dist}")
+                return {'_global': calculated_dist}
             
         except Exception as e:
             self.emit.log("error", f"Threshold calculation failed: {str(e)}")
-            return 0.1  # Default threshold
+            if self.timepoint_labels:
+                return {tp: 0.1 for tp in self.timepoint_labels}
+            return {'_global': 0.1}
     
-    def run_clonality_analysis(self, threshold: float) -> bool:
-        """Run clonality analysis."""
+    def run_clonality_analysis(self, thresholds: Dict[str, float]) -> bool:
+        """Run clonality analysis - per timepoint if mapping available, else single global.
+        
+        Args:
+            thresholds: dict of tp_label -> threshold value (or {'_global': value} for single cohort)
+        """
         self.emit.progress("clonality", 50, "Running clonality analysis...")
         
         try:
+            import pandas as pd
             import utils.clonalityFunctions as clonalityFunctions
-            # Update outs_dir to use our output_dir
             original_outs_dir = clonalityFunctions.outs_dir
-            clonalityFunctions.outs_dir = self.output_dir
             
-            try:
-                db_pass_path = os.path.join(self.output_dir, "ig_out_data_db-pass.tsv")
-                clone_pass_path = os.path.join(self.output_dir, "ig_out_data_db-pass_clone-pass.tsv")
+            # Single-cohort mode (backward compat)
+            if '_global' in thresholds or not self.timepoint_labels:
+                threshold = thresholds.get('_global', list(thresholds.values())[0])
+                clonalityFunctions.outs_dir = self.output_dir
+                try:
+                    db_pass_path = os.path.join(self.output_dir, "ig_out_data_db-pass.tsv")
+                    clone_pass_path = os.path.join(self.output_dir, "ig_out_data_db-pass_clone-pass.tsv")
+                    
+                    self.emit.log("info", f"Clone definition (single cohort): mode={self.clone_mode}, linkage={self.linkage_method}, threshold={threshold}")
+                    define_clonality(db_pass_path, str(threshold), mode=self.clone_mode, link=self.linkage_method)
+                    create_germline(clone_pass_path, self.database_v, self.database_d, self.database_j)
+                    self.emit.log("info", "Clonality analysis complete (single cohort)")
+                finally:
+                    clonalityFunctions.outs_dir = original_outs_dir
                 
-                # Define clones with configurable mode and linkage
-                self.emit.log("info", f"Clone definition settings: mode={self.clone_mode}, linkage={self.linkage_method}, threshold={threshold}")
-                define_clonality(db_pass_path, str(threshold), mode=self.clone_mode, link=self.linkage_method)
-                self.emit.log("info", "Clone definition complete")
-                
-                # Create germlines
-                create_germline(clone_pass_path, self.database_v, self.database_d, self.database_j)
-                self.emit.log("info", "Germline creation complete")
-            finally:
-                # Restore original outs_dir
-                clonalityFunctions.outs_dir = original_outs_dir
+                germ_pass_path = os.path.join(self.output_dir, "ig_out_data_db-pass_clone-pass_germ-pass.tsv")
+                self.emit.result("clonality_output", path=germ_pass_path)
+                return True
             
-            germ_pass_path = os.path.join(self.output_dir, "ig_out_data_db-pass_clone-pass_germ-pass.tsv")
-            self.emit.result("clonality_output", path=germ_pass_path)
+            # Per-timepoint mode
+            self.emit.log("info", f"Running per-timepoint clonality for {len(self.timepoint_labels)} timepoints")
+            per_tp_dir = os.path.join(self.output_dir, 'per_timepoint')
+            
+            all_germ_dfs = []
+            clone_id_offset = 0
+            
+            for tp_idx, tp_label in enumerate(self.timepoint_labels):
+                tp_dir = os.path.join(per_tp_dir, tp_label)
+                threshold = thresholds.get(tp_label, 0.1)
+                
+                db_pass_path = os.path.join(tp_dir, 'db-pass.tsv')
+                if not os.path.exists(db_pass_path):
+                    self.emit.log("warn", f"No db-pass.tsv for timepoint {tp_label}, skipping")
+                    continue
+                
+                self.emit.progress("clonality", 50 + int(tp_idx / len(self.timepoint_labels) * 15),
+                                   f"Defining clones for {tp_label}...")
+                self.emit.log("info", f"  {tp_label}: threshold={threshold}, mode={self.clone_mode}, linkage={self.linkage_method}")
+                
+                # Point clonalityFunctions to the per-timepoint dir
+                clonalityFunctions.outs_dir = tp_dir
+                try:
+                    define_clonality(db_pass_path, str(threshold), mode=self.clone_mode, link=self.linkage_method)
+                    
+                    clone_pass_path = os.path.join(tp_dir, 'db-pass_clone-pass.tsv')
+                    if not os.path.exists(clone_pass_path):
+                        self.emit.log("warn", f"  {tp_label}: clone-pass.tsv not created, skipping germline")
+                        continue
+                    
+                    create_germline(clone_pass_path, self.database_v, self.database_d, self.database_j)
+                    
+                    germ_pass_path = os.path.join(tp_dir, 'db-pass_clone-pass_germ-pass.tsv')
+                    if not os.path.exists(germ_pass_path):
+                        self.emit.log("warn", f"  {tp_label}: germ-pass.tsv not created")
+                        continue
+                    
+                    # Read germ-pass and remap clone IDs to be globally unique
+                    tp_df = pd.read_table(germ_pass_path)
+                    
+                    if 'clone_id' in tp_df.columns:
+                        # Find max clone_id in this timepoint
+                        valid_ids = tp_df['clone_id'].dropna()
+                        if len(valid_ids) > 0:
+                            max_id = int(valid_ids.max())
+                            tp_df['clone_id'] = tp_df['clone_id'].apply(
+                                lambda x: int(x) + clone_id_offset if pd.notna(x) else x
+                            )
+                            clone_id_offset += max_id + 1
+                    
+                    # Add timepoint column for reference
+                    tp_df['timepoint'] = tp_label
+                    
+                    # Save remapped version back
+                    tp_df.to_csv(germ_pass_path, sep='\t', index=False)
+                    
+                    all_germ_dfs.append(tp_df)
+                    self.emit.log("info", f"  {tp_label}: {len(tp_df)} sequences with clones defined")
+                    
+                finally:
+                    clonalityFunctions.outs_dir = original_outs_dir
+            
+            if not all_germ_dfs:
+                self.emit.log("error", "No timepoints produced clonality results")
+                return False
+            
+            # Merge all per-timepoint germ-pass TSVs into one
+            merged_df = pd.concat(all_germ_dfs, ignore_index=True)
+            merged_path = os.path.join(self.output_dir, "ig_out_data_db-pass_clone-pass_germ-pass.tsv")
+            merged_df.to_csv(merged_path, sep='\t', index=False)
+            
+            self.emit.log("info", f"Merged germ-pass: {len(merged_df)} total sequences from {len(all_germ_dfs)} timepoints")
+            self.emit.log("info", f"Clone ID offset after merge: {clone_id_offset} (globally unique)")
+            self.emit.result("clonality_output", path=merged_path)
             
             return True
             
         except Exception as e:
             self.emit.log("error", f"Clonality analysis failed: {str(e)}")
+            traceback.print_exc()
             return False
     
+    def build_cross_timepoint_lineages(self) -> bool:
+        """Match clones across timepoints by V-gene + J-gene + CDR3 AA similarity.
+        
+        Assigns a lineage_id to each sequence. Clones from different timepoints that share
+        the same V-gene family, J-gene, and CDR3 AA sequence (>=85% similarity) get the same
+        lineage_id, enabling cross-timepoint tracking.
+        """
+        if not self.timepoint_labels or len(self.timepoint_labels) < 2:
+            self.emit.log("info", "Skipping cross-timepoint lineage mapping (< 2 timepoints)")
+            return True
+        
+        self.emit.progress("lineage", 67, "Building cross-timepoint lineage map...")
+        
+        try:
+            import pandas as pd
+            
+            merged_path = os.path.join(self.output_dir, "ig_out_data_db-pass_clone-pass_germ-pass.tsv")
+            if not os.path.exists(merged_path):
+                self.emit.log("warn", "Merged germ-pass not found, skipping lineage mapping")
+                return True
+            
+            df = pd.read_table(merged_path)
+            
+            if 'timepoint' not in df.columns or 'clone_id' not in df.columns:
+                self.emit.log("warn", "Missing timepoint/clone_id columns, skipping lineage mapping")
+                return True
+            
+            # Build representative clone profiles: one entry per (timepoint, clone_id)
+            # with the consensus V-gene family, J-gene, and CDR3 AA
+            clone_profiles = []
+            for (tp, cid), group in df.groupby(['timepoint', 'clone_id']):
+                if pd.isna(cid):
+                    continue
+                
+                v_call = group['v_call'].dropna().mode()
+                j_call = group['j_call'].dropna().mode()
+                junction_aa = group['junction_aa'].dropna().mode()
+                
+                v_fam = str(v_call.iloc[0]).split('*')[0] if len(v_call) > 0 else ''
+                j_gene = str(j_call.iloc[0]).split('*')[0] if len(j_call) > 0 else ''
+                cdr3_aa = str(junction_aa.iloc[0]) if len(junction_aa) > 0 else ''
+                
+                if v_fam and j_gene and cdr3_aa and cdr3_aa != 'nan':
+                    clone_profiles.append({
+                        'timepoint': tp,
+                        'clone_id': int(cid),
+                        'v_family': v_fam,
+                        'j_gene': j_gene,
+                        'cdr3_aa': cdr3_aa,
+                        'size': len(group)
+                    })
+            
+            self.emit.log("info", f"Built {len(clone_profiles)} clone profiles for lineage matching")
+            
+            # Match clones across timepoints using V+J+CDR3 AA similarity
+            def cdr3_similarity(s1, s2):
+                if not s1 or not s2:
+                    return 0.0
+                max_len = max(len(s1), len(s2))
+                if max_len == 0:
+                    return 1.0
+                # Simple Levenshtein-like: count matches at each position
+                matches = sum(1 for a, b in zip(s1, s2) if a == b)
+                return matches / max_len
+            
+            # Union-Find for grouping matched clones
+            parent = {}
+            def find(x):
+                while parent.get(x, x) != x:
+                    parent[x] = parent.get(parent[x], parent[x])
+                    x = parent[x]
+                return x
+            def union(a, b):
+                ra, rb = find(a), find(b)
+                if ra != rb:
+                    parent[ra] = rb
+            
+            # Compare clones across different timepoints
+            for i in range(len(clone_profiles)):
+                for j in range(i + 1, len(clone_profiles)):
+                    pi, pj = clone_profiles[i], clone_profiles[j]
+                    if pi['timepoint'] == pj['timepoint']:
+                        continue  # Only match across timepoints
+                    if pi['v_family'] != pj['v_family']:
+                        continue
+                    if pi['j_gene'] != pj['j_gene']:
+                        continue
+                    sim = cdr3_similarity(pi['cdr3_aa'], pj['cdr3_aa'])
+                    if sim >= 0.85:
+                        union(pi['clone_id'], pj['clone_id'])
+            
+            # Assign lineage IDs
+            lineage_map = {}  # clone_id -> lineage_id
+            lineage_counter = 1
+            root_to_lineage = {}
+            
+            for profile in clone_profiles:
+                root = find(profile['clone_id'])
+                if root not in root_to_lineage:
+                    root_to_lineage[root] = lineage_counter
+                    lineage_counter += 1
+                lineage_map[profile['clone_id']] = root_to_lineage[root]
+            
+            # Count cross-timepoint lineages (lineages spanning >1 timepoint)
+            lineage_to_tps = {}
+            for profile in clone_profiles:
+                lid = lineage_map.get(profile['clone_id'])
+                if lid is not None:
+                    if lid not in lineage_to_tps:
+                        lineage_to_tps[lid] = set()
+                    lineage_to_tps[lid].add(profile['timepoint'])
+            
+            cross_tp_lineages = {lid: tps for lid, tps in lineage_to_tps.items() if len(tps) > 1}
+            self.emit.log("info", f"Found {len(cross_tp_lineages)} cross-timepoint lineages (out of {lineage_counter - 1} total)")
+            
+            # Add lineage_id column to merged germ-pass
+            df['lineage_id'] = df['clone_id'].apply(lambda x: lineage_map.get(int(x)) if pd.notna(x) else None)
+            df.to_csv(merged_path, sep='\t', index=False)
+            
+            # Save lineage mapping
+            lineage_info = {
+                'lineage_map': {str(k): v for k, v in lineage_map.items()},
+                'cross_timepoint_lineages': {str(lid): list(tps) for lid, tps in cross_tp_lineages.items()},
+                'total_lineages': lineage_counter - 1,
+                'cross_timepoint_count': len(cross_tp_lineages)
+            }
+            lineage_path = os.path.join(self.output_dir, 'cross_timepoint_lineages.json')
+            with open(lineage_path, 'w') as f:
+                json.dump(lineage_info, f, indent=2)
+            
+            self.emit.log("info", "Cross-timepoint lineage mapping complete")
+            return True
+            
+        except Exception as e:
+            self.emit.log("warn", f"Cross-timepoint lineage mapping failed (non-fatal): {str(e)}")
+            traceback.print_exc()
+            return True  # Non-fatal
+    
+    def assign_c_genes(self) -> bool:
+        """Assign C gene (isotype) to each sequence via blastn against the C gene database.
+        
+        The installed IgBLAST (1.16) does not support -c_region_db, so we perform a
+        separate blastn search of the combined FASTA against the C gene BLAST database.
+        The top hit per query (≥ 80% identity, ≥ 50 nt alignment) is assigned as c_call.
+        The result is written into the germ-pass TSV's c_call column.
+        """
+        self.emit.progress("c_gene", 55, "Assigning isotype (C gene)...")
+        
+        igblast_db_c = getattr(self, 'igblast_db_c', None)
+        if not igblast_db_c:
+            self.emit.log("info", "No C gene database available, skipping isotype assignment")
+            return True  # Non-fatal
+        
+        # Verify BLAST DB exists
+        if not any(os.path.exists(igblast_db_c + ext) for ext in ['.ndb', '.nin', '.nsq']):
+            self.emit.log("warn", "C gene BLAST database index files not found, skipping isotype assignment")
+            return True
+        
+        try:
+            import subprocess
+            import pandas as pd
+            
+            blastn_path = os.path.join(self.bin_dir, 'blastn')
+            if not os.path.exists(blastn_path):
+                # Fallback to system blastn
+                blastn_path = 'blastn'
+            
+            # Run blastn: combined.fasta vs C gene DB
+            # Output format 6 (tabular): qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore
+            blast_out = os.path.join(self.output_dir, 'c_gene_blast.tsv')
+            cmd = [
+                blastn_path,
+                '-query', self.combined_fasta,
+                '-db', igblast_db_c,
+                '-outfmt', '6 qseqid sseqid pident length',
+                '-max_target_seqs', '1',        # Only top hit per query
+                '-max_hsps', '1',                # Only best HSP
+                '-evalue', '1e-5',               # Stringent e-value
+                '-num_threads', '4',
+                '-out', blast_out
+            ]
+            
+            self.emit.log("info", f"Running blastn for C gene assignment: {' '.join(cmd[:6])}...")
+            
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            
+            if result.returncode != 0:
+                self.emit.log("warn", f"blastn for C gene failed (rc={result.returncode}): {result.stderr[:300]}")
+                return True  # Non-fatal
+            
+            # Parse results: keep hits with ≥80% identity and ≥50nt alignment
+            c_call_map = {}  # sequence_id -> c_call (e.g. "IGHM*01")
+            if os.path.exists(blast_out) and os.path.getsize(blast_out) > 0:
+                blast_df = pd.read_csv(blast_out, sep='\t', header=None,
+                                       names=['qseqid', 'sseqid', 'pident', 'length'])
+                
+                good_hits = blast_df[(blast_df['pident'] >= 80.0) & (blast_df['length'] >= 50)]
+                
+                for _, row in good_hits.iterrows():
+                    seq_id = str(row['qseqid'])
+                    c_gene = str(row['sseqid'])  # e.g. "IGHM*01"
+                    c_call_map[seq_id] = c_gene
+                
+                self.emit.log("info", f"C gene assignment: {len(c_call_map)}/{len(blast_df)} sequences passed filters (≥80% id, ≥50nt)")
+            else:
+                self.emit.log("warn", "blastn produced no output for C gene assignment")
+                return True
+            
+            if not c_call_map:
+                self.emit.log("warn", "No sequences met C gene assignment thresholds")
+                return True
+            
+            # Summarize isotype distribution
+            from collections import Counter
+            isotype_counts = Counter()
+            for c_gene in c_call_map.values():
+                # Extract gene family (e.g. IGHM*01 -> IGHM)
+                gene_family = c_gene.split('*')[0] if '*' in c_gene else c_gene
+                isotype_counts[gene_family] += 1
+            self.emit.log("info", f"Isotype distribution: {dict(isotype_counts)}")
+            
+            # Update germ-pass TSV with c_call column
+            germ_pass_path = os.path.join(self.output_dir, "ig_out_data_db-pass_clone-pass_germ-pass.tsv")
+            if os.path.exists(germ_pass_path):
+                df = pd.read_table(germ_pass_path)
+                df['c_call'] = df['sequence_id'].map(c_call_map).fillna('')
+                df.to_csv(germ_pass_path, sep='\t', index=False)
+                assigned = (df['c_call'] != '').sum()
+                self.emit.log("info", f"Updated {germ_pass_path}: {assigned}/{len(df)} sequences have c_call")
+            
+            # Also update db-pass and clone-pass TSVs for completeness
+            for tsv_name in ['ig_out_data_db-pass.tsv', 'ig_out_data_db-pass_clone-pass.tsv']:
+                tsv_path = os.path.join(self.output_dir, tsv_name)
+                if os.path.exists(tsv_path):
+                    try:
+                        df = pd.read_table(tsv_path)
+                        df['c_call'] = df['sequence_id'].map(c_call_map).fillna('')
+                        df.to_csv(tsv_path, sep='\t', index=False)
+                    except Exception as e:
+                        self.emit.log("warn", f"Could not update {tsv_name}: {e}")
+            
+            return True
+            
+        except Exception as e:
+            self.emit.log("warn", f"C gene assignment failed (non-fatal): {str(e)}")
+            return True  # Non-fatal
+    
+    def _build_trees_for_cohort(self, germ_pass_path: str, work_dir: str, trees_out_dir: str, label: str) -> List[int]:
+        """Build trees for a single cohort (timepoint or global).
+        
+        Args:
+            germ_pass_path: Path to the germ-pass TSV for this cohort
+            work_dir: Directory for intermediate files (build-trees-input, etc.)
+            trees_out_dir: Directory to write newick/png files
+            label: Label for logging (e.g. 'T1' or 'global')
+        
+        Returns: List of clone IDs that were built
+        """
+        import pandas as pd
+        import subprocess
+        from Bio import SeqIO
+        
+        os.makedirs(trees_out_dir, exist_ok=True)
+        
+        if not os.path.exists(germ_pass_path):
+            self.emit.log("warn", f"[{label}] Germline pass file not found, skipping")
+            return []
+        
+        clonedf = pd.read_table(germ_pass_path)
+        clonedf['clone_freq'] = clonedf.groupby('clone_id')['sequence_id'].transform('count')
+        clonedf.sort_values('clone_freq', inplace=True, ascending=False)
+        
+        clone_sizes = clonedf.groupby('clone_id').size().sort_values(ascending=False)
+        valid_clones = clone_sizes[clone_sizes >= 3]
+        top_clones = valid_clones.head(20).index.tolist()
+        
+        if not top_clones:
+            self.emit.log("info", f"[{label}] No clones with >= 3 sequences, skipping trees")
+            return []
+        
+        self.emit.log("info", f"[{label}] Building trees for {len(top_clones)} clones")
+        
+        tempdf = clonedf[clonedf['clone_id'].isin(top_clones)].copy()
+        if 'clone_freq' in tempdf.columns:
+            tempdf = tempdf.drop(columns=['clone_freq'])
+        
+        input_tsv = os.path.join(work_dir, 'build-trees-input.tsv')
+        tempdf.to_csv(input_tsv, sep="\t", index=False)
+        
+        # Build sequence count mapping
+        sequence_counts_by_clone = {}
+        combined_fasta = os.path.join(self.output_dir, 'combined.fasta')
+        
+        if os.path.exists(combined_fasta):
+            seq_content_map = {}
+            for record in SeqIO.parse(combined_fasta, "fasta"):
+                seq_content = str(record.seq).upper().replace('-', '').replace('N', '')
+                seq_content_map[str(record.id)] = seq_content
+            
+            for clone_id in top_clones:
+                clone_seqs = clonedf[clonedf['clone_id'] == clone_id]
+                content_counts = {}
+                for _, row in clone_seqs.iterrows():
+                    seq_id = str(row['sequence_id'])
+                    if seq_id in seq_content_map:
+                        seq_content = seq_content_map[seq_id]
+                        content_counts[seq_content] = content_counts.get(seq_content, 0) + 1
+                sequence_counts_by_clone[str(clone_id)] = content_counts
+        
+        counts_path = os.path.join(work_dir, 'sequence_counts.json')
+        with open(counts_path, 'w') as f:
+            json.dump(sequence_counts_by_clone, f)
+        
+        # Run BuildTrees.py
+        build_trees_dir = os.path.join(work_dir, 'build-trees-input')
+        if os.path.exists(build_trees_dir):
+            import shutil
+            shutil.rmtree(build_trees_dir)
+        
+        original_cwd = os.getcwd()
+        try:
+            os.chdir(work_dir)
+            build_trees_result = subprocess.run(
+                ['BuildTrees.py', '-d', 'build-trees-input.tsv', '--clean', 'all', '--collapse'],
+                capture_output=True, text=True, timeout=600
+            )
+            if build_trees_result.returncode != 0:
+                self.emit.log("warn", f"[{label}] BuildTrees.py failed: {build_trees_result.stderr[:300]}")
+        finally:
+            os.chdir(original_cwd)
+        
+        # Run R tree building script
+        build_trees_r = os.path.join(backend_dir, 'scripts', 'build-trees-iqtree.R')
+        r_env = os.environ.copy()
+        r_env['R_HOME'] = '/Library/Frameworks/R.framework/Resources'
+        r_env['R_SHARE_DIR'] = '/Library/Frameworks/R.framework/Resources/share'
+        r_env['R_INCLUDE_DIR'] = '/Library/Frameworks/R.framework/Resources/include'
+        r_env['R_DOC_DIR'] = '/Library/Frameworks/R.framework/Resources/doc'
+        r_env['EDITOR'] = '/usr/bin/nano'
+        r_cmd = '/Library/Frameworks/R.framework/Versions/4.5-arm64/Resources/bin/Rscript'
+        
+        result = subprocess.run(
+            [r_cmd, build_trees_r, work_dir],
+            capture_output=True, text=True, timeout=3600, env=r_env
+        )
+        
+        if result.returncode != 0:
+            self.emit.log("warn", f"[{label}] R tree building failed: {result.stderr[:300]}")
+            return []
+        
+        # Move newick files from work_dir/trees/ to trees_out_dir
+        work_trees = os.path.join(work_dir, 'trees')
+        if os.path.isdir(work_trees):
+            for f in os.listdir(work_trees):
+                if f.endswith('.newick'):
+                    src = os.path.join(work_trees, f)
+                    dst = os.path.join(trees_out_dir, f)
+                    import shutil
+                    shutil.move(src, dst)
+        
+        tree_files = glob.glob(os.path.join(trees_out_dir, '*.newick'))
+        self.emit.log("info", f"[{label}] Built {len(tree_files)} trees")
+        return top_clones
+    
     def build_trees(self) -> bool:
-        """Build phylogenetic trees."""
+        """Build phylogenetic trees - per timepoint if mapping available, else global."""
         self.emit.log("info", "=" * 60)
         self.emit.log("info", "STARTING TREE BUILDING STEP")
         self.emit.log("info", "=" * 60)
@@ -533,255 +1163,44 @@ class PipelineRunner:
         
         try:
             import pandas as pd
-            import glob
-            import subprocess
             
-            # CLEAN OLD TREE FILES FIRST - before doing anything else
+            # Clean old tree directory completely
             trees_dir = os.path.join(self.output_dir, 'trees')
+            if os.path.exists(trees_dir):
+                import shutil
+                shutil.rmtree(trees_dir)
             os.makedirs(trees_dir, exist_ok=True)
             
-            self.emit.log("info", f"Cleaning old tree files from {trees_dir}...")
-            old_trees = glob.glob(os.path.join(trees_dir, '*.png')) + glob.glob(os.path.join(trees_dir, '*.newick'))
-            removed_count = 0
-            for old_tree in old_trees:
-                try:
-                    os.remove(old_tree)
-                    removed_count += 1
-                except Exception as e:
-                    self.emit.log("warn", f"Could not remove old tree file {old_tree}: {e}")
-            
-            if removed_count > 0:
-                self.emit.log("info", f"Removed {removed_count} old tree file(s) from previous runs")
-            else:
-                self.emit.log("info", "No old tree files found to clean")
-            
-            germ_pass_path = os.path.join(self.output_dir, "ig_out_data_db-pass_clone-pass_germ-pass.tsv")
-            
-            if not os.path.exists(germ_pass_path):
-                self.emit.log("warn", "Germline pass file not found, skipping tree building")
-                # Send empty result to frontend so it knows there are no trees
-                self.emit.result("tree_images", data={
-                    "images": [],
-                    "tree_metadata": []
-                })
-                return True
-            
-            # Read clone data
-            clonedf = pd.read_table(germ_pass_path)
-            
-            # Sort by clone_id frequency
-            clonedf['clone_freq'] = clonedf.groupby('clone_id')['sequence_id'].transform('count')
-            clonedf.sort_values('clone_freq', inplace=True, ascending=False)
-            
-            # Get top clones for tree building (by clone size)
-            # First, identify clones by size and filter to only those with >= 3 sequences
-            clone_sizes = clonedf.groupby('clone_id').size().sort_values(ascending=False)
-            
-            # Filter to only clones with >= 3 sequences (required for tree building)
-            valid_clones = clone_sizes[clone_sizes >= 3]
-            
-            # Get top 20 clones that have >= 3 sequences
-            top_clones = valid_clones.head(20).index.tolist()
-            
-            if len(top_clones) == 0:
-                self.emit.log("warn", "No clones with >= 3 sequences found, skipping tree building")
-                # Still send empty result to frontend
-                self.emit.result("tree_images", data={
-                    "images": [],
-                    "tree_metadata": []
-                })
-                return True
-            
-            self.emit.log("info", f"Found {len(top_clones)} clones with >= 3 sequences (top {min(20, len(valid_clones))} selected)")
-            
-            # Write ALL sequences from these top clones to build-trees-input.tsv
-            tempdf = clonedf[clonedf['clone_id'].isin(top_clones)].copy()
-            
-            # Drop the clone_freq column if it exists (was only for sorting)
-            if 'clone_freq' in tempdf.columns:
-                tempdf = tempdf.drop(columns=['clone_freq'])
-            
-            build_trees_input_path = os.path.join(self.output_dir, 'build-trees-input.tsv')
-            tempdf.to_csv(build_trees_input_path, sep="\t", index=False)
-            
-            # Verify the file was created and has data
-            if not os.path.exists(build_trees_input_path):
-                self.emit.log("error", f"Failed to create build-trees-input.tsv file!")
-                # Send empty result to frontend
-                self.emit.result("tree_images", data={
-                    "images": [],
-                    "tree_metadata": []
-                })
-                return True
-            
-            file_size = os.path.getsize(build_trees_input_path)
-            self.emit.log("info", f"Prepared {len(tempdf)} sequences from {len(top_clones)} clones for tree building")
-            self.emit.log("info", f"Created build-trees-input.tsv ({file_size} bytes) with clones: {top_clones[:10]}{'...' if len(top_clones) > 10 else ''}")
-            
-            # Create sequence count mapping BEFORE BuildTrees collapses sequences
-            # Count how many times each unique sequence appears WITHIN EACH CLONE
-            # BuildTrees collapses identical sequences, so we need to count by sequence content
-            # CRITICAL: Store counts per clone to avoid cross-clone contamination
-            from Bio import SeqIO
-            sequence_counts_by_clone = {}  # {clone_id: {seq_id: count}}
-            combined_fasta = os.path.join(self.output_dir, 'combined.fasta')
-            
-            if os.path.exists(combined_fasta):
-                # Create a mapping of sequence_id -> sequence content
-                seq_content_map = {}
-                for record in SeqIO.parse(combined_fasta, "fasta"):
-                    # Normalize sequence: uppercase and remove gaps
-                    seq_content = str(record.seq).upper().replace('-', '').replace('N', '')
-                    seq_content_map[str(record.id)] = seq_content
-                
-                # Count sequences by their actual DNA content (not just ID) per clone
-                # Store counts by SEQUENCE CONTENT, not by ID, because BuildTrees collapses identical sequences
-                for clone_id in top_clones:
-                    clone_seqs = clonedf[clonedf['clone_id'] == clone_id]
-                    # Group by sequence content to count duplicates within this clone
-                    content_counts = {}
-                    for _, row in clone_seqs.iterrows():
-                        seq_id = str(row['sequence_id'])
-                        if seq_id in seq_content_map:
-                            seq_content = seq_content_map[seq_id]
-                            if seq_content not in content_counts:
-                                content_counts[seq_content] = 0
-                            content_counts[seq_content] += 1
+            if self.timepoint_labels:
+                # Per-timepoint tree building
+                total_trees = 0
+                for tp_idx, tp_label in enumerate(self.timepoint_labels):
+                    self.emit.progress("trees", 70 + int(tp_idx / len(self.timepoint_labels) * 10),
+                                       f"Building trees for {tp_label}...")
                     
-                    # Store counts BY CONTENT for this clone
-                    # The R script will match sequences by content, not by ID
-                    sequence_counts_by_clone[str(clone_id)] = content_counts
-            else:
-                # Fallback: count by sequence_id (won't catch duplicates with different IDs)
-                for clone_id in top_clones:
-                    clone_seqs = clonedf[clonedf['clone_id'] == clone_id]
-                    sequence_counts_by_clone[str(clone_id)] = {}
-                    for seq_id in clone_seqs['sequence_id']:
-                        seq_id_str = str(seq_id)
-                        if seq_id_str not in sequence_counts_by_clone[str(clone_id)]:
-                            sequence_counts_by_clone[str(clone_id)][seq_id_str] = 1
-            
-            # Save sequence counts to a JSON file for R script to read
-            import json
-            sequence_counts_path = os.path.join(self.output_dir, 'sequence_counts.json')
-            with open(sequence_counts_path, 'w') as f:
-                json.dump(sequence_counts_by_clone, f)
-            
-            # Run BuildTrees (without IgPhyML)
-            build_trees_dir = os.path.join(self.output_dir, 'build-trees-input')
-            os.system(f"rm -rf {build_trees_dir}")
-            
-            self.emit.log("info", f"Running BuildTrees.py on {build_trees_input_path}...")
-            original_cwd = os.getcwd()
-            try:
-                os.chdir(self.output_dir)
-                # Build trees with BuildTrees (--collapse: deduplicate identical sequences before tree building, matches validated pipeline)
-                # --clean all: only remove sequences with ambiguous nucleotides
-                debug_log = os.path.join(self.output_dir, 'tree_building_debug.log')
-                with open(debug_log, 'w') as f:
-                    f.write(f"Running BuildTrees.py at {os.getcwd()}\n")
-                    f.write(f"Command: BuildTrees.py -d build-trees-input.tsv --clean all --collapse\n\n")
-                
-                build_trees_result = subprocess.run(
-                    ['BuildTrees.py', '-d', 'build-trees-input.tsv', '--clean', 'all', '--collapse'],
-                    capture_output=True,
-                    text=True,
-                    timeout=600
-                )
-                
-                # Append results to debug log
-                with open(debug_log, 'a') as f:
-                    f.write(f"Return code: {build_trees_result.returncode}\n\n")
-                    f.write(f"STDOUT:\n{build_trees_result.stdout}\n\n")
-                    f.write(f"STDERR:\n{build_trees_result.stderr}\n")
-                
-                if build_trees_result.returncode != 0:
-                    self.emit.log("error", f"BuildTrees.py failed! See {debug_log} for details")
-                    self.emit.log("error", f"BuildTrees stderr: {build_trees_result.stderr[:500] if build_trees_result.stderr else 'no stderr'}")
-                else:
-                    self.emit.log("info", f"BuildTrees.py completed successfully (log: {debug_log})")
-                
-                # Check if FASTA files were created
-                if os.path.exists(build_trees_dir):
-                    fasta_count = len(glob.glob(os.path.join(build_trees_dir, '*.fasta')))
-                    self.emit.log("info", f"BuildTrees created {fasta_count} FASTA file(s) in {build_trees_dir}")
-                else:
-                    self.emit.log("warn", f"BuildTrees directory {build_trees_dir} was not created!")
+                    tp_dir = os.path.join(self.output_dir, 'per_timepoint', tp_label)
+                    germ_path = os.path.join(tp_dir, 'db-pass_clone-pass_germ-pass.tsv')
+                    tp_trees_dir = os.path.join(trees_dir, tp_label)
                     
-            finally:
-                os.chdir(original_cwd)
-            
-            # Build trees using IQ-TREE2 (Maximum Likelihood) with fallback to Neighbor-Joining
-            # IQ-TREE2 provides better phylogenetic inference than NJ, closer to IgPhyML quality
-            # Automatically falls back to NJ if IQ-TREE2 is not installed
-            # (subprocess already imported at top of try block)
-            
-            # trees_dir already created and cleaned above
-            
-            # Use the new IQ-TREE2 script (with automatic NJ fallback)
-            build_trees_r = os.path.join(backend_dir, 'scripts', 'build-trees-iqtree.R')
-            
-            # Estimate time: ~20-40 minutes for 20 trees, more with many clones
-            # With parallel processing: ~5-10 minutes on 8-core system
-            self.emit.log("info", "Building phylogenetic trees... This may take 10-30 minutes for large datasets")
-            self.emit.log("info", "Tree building is parallelized across CPU cores for faster processing")
-            
-            # Set up R environment explicitly to avoid "cannot find system Renviron" error
-            r_env = os.environ.copy()
-            r_env['R_HOME'] = '/Library/Frameworks/R.framework/Resources'
-            r_env['R_SHARE_DIR'] = '/Library/Frameworks/R.framework/Resources/share'
-            r_env['R_INCLUDE_DIR'] = '/Library/Frameworks/R.framework/Resources/include'
-            r_env['R_DOC_DIR'] = '/Library/Frameworks/R.framework/Resources/doc'
-            # Set editor to avoid "invalid value for 'editor'" error
-            r_env['EDITOR'] = '/usr/bin/nano'
-            # Try to use the direct R binary path to bypass wrapper issues
-            r_cmd = '/Library/Frameworks/R.framework/Versions/4.5-arm64/Resources/bin/Rscript'
-            
-            result = subprocess.run(
-                [r_cmd, build_trees_r, self.output_dir],
-                capture_output=True,
-                text=True,
-                timeout=3600,  # Increased to 60 minutes (was 300 seconds = 5 min)
-                env=r_env
-            )
-            
-            if result.returncode != 0:
-                self.emit.log("error", f"Tree building R script failed with return code {result.returncode}")
-                self.emit.log("error", f"R script stderr: {result.stderr[:500] if result.stderr else 'no stderr'}")
-                self.emit.log("error", f"R script stdout: {result.stdout[:500] if result.stdout else 'no stdout'}")
-                # Send empty result to frontend
-                self.emit.result("tree_images", data={
-                    "images": [],
-                    "tree_metadata": []
-                })
-                return True  # Non-fatal
-            
-            # Count generated trees (only from this run)
-            tree_files = glob.glob(os.path.join(trees_dir, '*.newick'))
-            self.emit.log("info", f"Tree building complete. Found {len(tree_files)} Newick file(s) in {trees_dir}")
-            
-            if len(tree_files) == 0:
-                self.emit.log("warn", f"No tree files generated! Check R script output above.")
-                self.emit.log("info", f"R script stdout: {result.stdout[:1000] if result.stdout else 'no stdout'}")
-            elif len(tree_files) > len(top_clones):
-                self.emit.log("warn", f"Generated {len(tree_files)} trees but expected max {len(top_clones)}. Some clones may have been split or had multiple trees.")
-            elif len(tree_files) < len(top_clones):
-                self.emit.log("info", f"Generated {len(tree_files)} trees from {len(top_clones)} clones (some clones may have been skipped due to < 3 sequences after cleaning)")
+                    clones = self._build_trees_for_cohort(germ_path, tp_dir, tp_trees_dir, tp_label)
+                    total_trees += len(glob.glob(os.path.join(tp_trees_dir, '*.newick')))
+                
+                self.emit.log("info", f"Per-timepoint tree building complete: {total_trees} total trees across {len(self.timepoint_labels)} timepoints")
             else:
-                self.emit.log("info", f"Successfully built {len(tree_files)} phylogenetic trees for {len(top_clones)} clones")
+                # Single cohort mode
+                germ_pass_path = os.path.join(self.output_dir, "ig_out_data_db-pass_clone-pass_germ-pass.tsv")
+                self._build_trees_for_cohort(germ_pass_path, self.output_dir, trees_dir, 'global')
+            
             return True
             
         except Exception as e:
             self.emit.log("warn", f"Tree building failed (non-fatal): {str(e)}")
-            # Send empty result to frontend so it knows there are no trees
-            self.emit.result("tree_images", data={
-                "images": [],
-                "tree_metadata": []
-            })
-            return True  # Non-fatal
+            traceback.print_exc()
+            self.emit.result("tree_images", data={"images": [], "tree_metadata": []})
+            return True
     
     def visualize_trees(self) -> bool:
-        """Generate tree visualizations."""
+        """Generate tree visualizations - handles both per-timepoint and flat tree dirs."""
         self.emit.log("info", "=" * 60)
         self.emit.log("info", "STARTING TREE VISUALIZATION STEP")
         self.emit.log("info", "=" * 60)
@@ -789,16 +1208,11 @@ class PipelineRunner:
         
         try:
             import subprocess
+            import pandas as pd
             
             trees_dir = os.path.join(self.output_dir, 'trees')
-            os.makedirs(trees_dir, exist_ok=True)
-            
             visualize_script = os.path.join(backend_dir, 'scripts', 'visualize-tree.R')
             
-            self.emit.log("info", f"Running tree visualization script: {visualize_script}")
-            self.emit.log("info", f"Output directory: {self.output_dir}")
-            
-            # Set up R environment explicitly
             r_env = os.environ.copy()
             r_env['R_HOME'] = '/Library/Frameworks/R.framework/Resources'
             r_env['R_SHARE_DIR'] = '/Library/Frameworks/R.framework/Resources/share'
@@ -807,120 +1221,119 @@ class PipelineRunner:
             r_env['EDITOR'] = '/usr/bin/nano'
             r_cmd = '/Library/Frameworks/R.framework/Versions/4.5-arm64/Resources/bin/Rscript'
             
-            result = subprocess.run(
-                [r_cmd, visualize_script, self.output_dir],
-                capture_output=True,
-                text=True,
-                timeout=300,
-                env=r_env
-            )
+            # Load clone sizes from merged germ-pass
+            clone_sizes = {}
+            clone_pass_path = os.path.join(self.output_dir, 'ig_out_data_db-pass_clone-pass_germ-pass.tsv')
+            if os.path.exists(clone_pass_path):
+                clone_df = pd.read_table(clone_pass_path)
+                for cid in clone_df['clone_id'].unique():
+                    if pd.notna(cid):
+                        clone_sizes[int(cid)] = len(clone_df[clone_df['clone_id'] == cid])
             
-            if result.returncode != 0:
-                self.emit.log("error", f"Tree visualization failed with return code {result.returncode}")
-                self.emit.log("error", f"R script stderr: {result.stderr[:500] if result.stderr else 'no stderr'}")
-                self.emit.log("error", f"R script stdout: {result.stdout[:500] if result.stdout else 'no stdout'}")
-            else:
-                self.emit.log("info", f"Tree visualization script completed successfully")
-                if result.stdout:
-                    self.emit.log("info", f"Visualization output: {result.stdout[:200]}")
+            # Detect per-timepoint subdirectories
+            tp_subdirs = []
+            if os.path.isdir(trees_dir):
+                for entry in sorted(os.listdir(trees_dir)):
+                    subdir = os.path.join(trees_dir, entry)
+                    if os.path.isdir(subdir) and glob.glob(os.path.join(subdir, '*.newick')):
+                        tp_subdirs.append((entry, subdir))
             
-            # List generated tree images and sort by clone size (largest first)
-            # Only include trees that have both PNG and Newick files (ensures they're complete and from current run)
-            all_tree_images = glob.glob(os.path.join(trees_dir, '*.png'))
-            all_tree_newicks = {os.path.basename(f).replace('.newick', '') for f in glob.glob(os.path.join(trees_dir, '*.newick'))}
+            all_tree_data = []
+            all_tree_images = []
             
-            # Filter to only include PNGs that have corresponding Newick files
-            tree_images = [
-                img for img in all_tree_images
-                if os.path.basename(img).replace('.png', '') in all_tree_newicks
-            ]
-            
-            if len(all_tree_images) > len(tree_images):
-                self.emit.log("warn", f"Found {len(all_tree_images)} PNG files but only {len(tree_images)} have corresponding Newick files. Filtering incomplete trees.")
-            
-            self.emit.log("info", f"Found {len(tree_images)} complete tree(s) (PNG + Newick)")
-            
-            if tree_images:
-                # Load clone sizes for sorting
+            def process_tree_dir(tree_dir, timepoint_label=None):
+                """Run visualization and collect tree metadata for one directory."""
+                newick_files = glob.glob(os.path.join(tree_dir, '*.newick'))
+                if not newick_files:
+                    return
+                
+                # The visualize-tree.R script expects an outs_dir with trees/ subdir
+                # We need to point it at the parent of the tree dir
+                # OR create a symlink. Simpler: run it per directory.
+                # The R script looks for trees/*.newick in the passed dir.
+                # For per-timepoint: parent_of_tree_dir = per_timepoint/T1, trees_dir = trees/T1
+                # We need a temp structure where <dir>/trees/*.newick exists.
+                # Easiest: create a temp wrapper dir with symlink.
+                
+                # Actually, the R script just does: newick_files <- list.files(trees_dir, ...)
+                # Let's just call it directly with the tree_dir path.
+                # But the R script expects: args[1] = outs_dir, then looks in outs_dir/trees/
+                # Let me check...
+                
+                # The script does: outs_dir <- args[1]; trees_dir <- file.path(outs_dir, "trees")
+                # So we need to set up a temp dir where temp_dir/trees/ -> our tree_dir
+                import tempfile
+                tmp_wrapper = tempfile.mkdtemp()
+                tmp_trees = os.path.join(tmp_wrapper, 'trees')
+                os.symlink(os.path.abspath(tree_dir), tmp_trees)
+                
                 try:
-                    import pandas as pd
-                    clone_pass_path = os.path.join(self.output_dir, 'ig_out_data_db-pass_clone-pass_germ-pass.tsv')
-                    
-                    if os.path.exists(clone_pass_path):
-                        clone_df = pd.read_table(clone_pass_path)
-                        
-                        # Calculate clone sizes
-                        clone_sizes = {}
-                        for clone_id in clone_df['clone_id'].unique():
-                            if pd.notna(clone_id):
-                                clone_sizes[int(clone_id)] = len(clone_df[clone_df['clone_id'] == clone_id])
-                        
-                        # Sort tree images by clone size (extract clone ID from filename)
-                        def get_clone_size(tree_path):
-                            # Extract clone ID from filename like "tree_192.png" -> 192
-                            basename = os.path.basename(tree_path)
-                            match = basename.replace('tree_', '').replace('.png', '')
-                            try:
-                                clone_id = int(match)
-                                return clone_sizes.get(clone_id, 0)
-                            except:
-                                return 0
-                        
-                        # Sort by clone size descending (largest first)
-                        tree_images.sort(key=get_clone_size, reverse=True)
-                        
-                        self.emit.log("info", f"Sorted {len(tree_images)} trees by clone size (largest first)")
-                    else:
-                        # Fallback: sort alphabetically
-                        tree_images.sort()
-                        self.emit.log("info", f"Generated {len(tree_images)} tree visualization(s)")
-                        
-                except Exception as e:
-                    # Fallback: sort alphabetically
-                    tree_images.sort()
-                    self.emit.log("warn", f"Could not sort trees by clone size: {str(e)}")
-                
-                # Send tree images with clone size metadata for better display
-                # Use absolute paths to avoid path resolution issues
-                tree_data = []
-                for tree_path in tree_images:
-                    # Normalize to absolute path
-                    abs_tree_path = os.path.abspath(tree_path)
-                    basename = os.path.basename(abs_tree_path)
-                    match = basename.replace('tree_', '').replace('.png', '')
+                    result = subprocess.run(
+                        [r_cmd, visualize_script, tmp_wrapper],
+                        capture_output=True, text=True, timeout=300, env=r_env
+                    )
+                    if result.returncode != 0:
+                        self.emit.log("warn", f"Visualization failed for {timepoint_label or 'global'}: {result.stderr[:300]}")
+                finally:
+                    # Clean up symlink and temp dir
                     try:
-                        clone_id = int(match)
-                        clone_size = clone_sizes.get(clone_id, 0) if 'clone_sizes' in locals() else 0
-                        tree_data.append({
-                            'path': abs_tree_path,
-                            'clone_id': clone_id,
-                            'clone_size': clone_size
-                        })
+                        os.unlink(tmp_trees)
+                        os.rmdir(tmp_wrapper)
                     except:
-                        tree_data.append({
-                            'path': abs_tree_path,
-                            'clone_id': None,
-                            'clone_size': 0
-                        })
+                        pass
                 
-                self.emit.result("tree_images", data={
-                    "images": tree_images,
-                    "tree_metadata": tree_data
-                })
-                self.emit.log("info", f"Sent {len(tree_images)} tree(s) to frontend")
-            else:
-                # Always send result, even if empty, so frontend knows there are no trees
-                self.emit.log("warn", "No tree images found - sending empty list to frontend")
-                self.emit.result("tree_images", data={
-                    "images": [],
-                    "tree_metadata": []
-                })
+                # Collect results
+                for png_path in sorted(glob.glob(os.path.join(tree_dir, '*.png'))):
+                    basename = os.path.basename(png_path)
+                    newick_name = basename.replace('.png', '')
+                    if not os.path.exists(os.path.join(tree_dir, newick_name + '.newick')):
+                        continue
+                    
+                    abs_path = os.path.abspath(png_path)
+                    match_str = basename.replace('tree_', '').replace('.png', '')
+                    try:
+                        clone_id = int(match_str)
+                        clone_size = clone_sizes.get(clone_id, 0)
+                    except ValueError:
+                        clone_id = None
+                        clone_size = 0
+                    
+                    entry = {
+                        'path': abs_path,
+                        'clone_id': clone_id,
+                        'clone_size': clone_size
+                    }
+                    if timepoint_label:
+                        entry['timepoint'] = timepoint_label
+                    
+                    all_tree_data.append(entry)
+                    all_tree_images.append(abs_path)
+            
+            if tp_subdirs:
+                for tp_label, subdir in tp_subdirs:
+                    self.emit.progress("visualize", 85, f"Visualizing trees for {tp_label}...")
+                    process_tree_dir(subdir, tp_label)
+            elif glob.glob(os.path.join(trees_dir, '*.newick')):
+                process_tree_dir(trees_dir)
+            
+            # Sort by clone size (largest first), keeping timepoint grouping
+            all_tree_data.sort(key=lambda x: (x.get('timepoint', ''), -x.get('clone_size', 0)))
+            all_tree_images = [d['path'] for d in all_tree_data]
+            
+            self.emit.log("info", f"Tree visualization complete: {len(all_tree_data)} trees total")
+            
+            self.emit.result("tree_images", data={
+                "images": all_tree_images,
+                "tree_metadata": all_tree_data
+            })
             
             return True
             
         except Exception as e:
             self.emit.log("warn", f"Tree visualization failed (non-fatal): {str(e)}")
-            return True  # Non-fatal
+            traceback.print_exc()
+            self.emit.result("tree_images", data={"images": [], "tree_metadata": []})
+            return True
     
     def load_results(self) -> bool:
         """Load and emit final results."""
@@ -978,7 +1391,8 @@ class PipelineRunner:
                         'cdr3_dna': None,
                         'cdr3_peptide': None,
                         'somatic_mutations': None,
-                        'isotype': None
+                        'isotype': None,
+                        'c_call': None
                     }
                     
                     # Extract V gene info
@@ -1065,14 +1479,25 @@ class PipelineRunner:
                         except Exception as e:
                             self.emit.log("debug", f"Failed to translate sequence {seq_id}: {str(e)}")
                     
+                    c_call = None
+                    if 'c_call' in clone_df.columns and pd.notna(row.get('c_call')):
+                        val = str(row['c_call']).strip()
+                        if val:  # Skip empty strings
+                            c_call = val
+                    lineage_id = None
+                    if 'lineage_id' in clone_df.columns and pd.notna(row.get('lineage_id')):
+                        lineage_id = int(row['lineage_id'])
+                    
                     clone_data[seq_id] = {
                         'clone_id': int(clone_id) if clone_id is not None else None,
                         'clone_count': len(clone_df[clone_df['clone_id'] == clone_id]) if clone_id is not None else 0,
-                        'productive': True,  # Productive sequences in pass file
+                        'productive': True,
                         'cdr3_dna': junction,
                         'cdr3_peptide': junction_aa,
                         'dna_sequence': dna_seq,
-                        'aa_sequence': aa_seq
+                        'aa_sequence': aa_seq,
+                        'c_call': c_call,
+                        'lineage_id': lineage_id
                     }
             
             # Load non-productive sequences from fail file (if --failed flag was used)
@@ -1215,7 +1640,7 @@ class PipelineRunner:
                     'v_gene': None, 'd_gene': None, 'j_gene': None,
                     'v_locus': None, 'd_locus': None, 'j_locus': None,
                     'cdr3_dna': None, 'cdr3_peptide': None, 'somatic_mutations': None,
-                    'isotype': None,
+                    'isotype': None, 'c_call': None,
                     'clone_id': dl_clone_id,
                     'clone_count': clone_counts.get(seq_id, 0),
                     'productive': True
@@ -1229,6 +1654,10 @@ class PipelineRunner:
                     seq_record['v_gene'] = str(row['v_call']) if pd.notna(row.get('v_call')) else None
                     seq_record['d_gene'] = str(row['d_call']) if pd.notna(row.get('d_call')) else None
                     seq_record['j_gene'] = str(row['j_call']) if pd.notna(row.get('j_call')) else None
+                    if 'c_call' in clonality_df.columns and pd.notna(row.get('c_call')):
+                        val = str(row['c_call']).strip()
+                        if val:
+                            seq_record['c_call'] = val
                 
                 dl_sequences.append(seq_record)
             
@@ -1298,14 +1727,17 @@ class PipelineRunner:
                 self.emit.complete(False, "IgBLAST analysis failed")
                 return False
             
-            # Step 7: Calculate threshold
-            threshold = self.calculate_threshold()
-            if threshold is None or self.check_cancelled():
+            # Step 6b: Load timepoint mapping (determines per-tp vs single-cohort mode)
+            self.load_timepoint_mapping()
+            
+            # Step 7: Calculate thresholds (per timepoint or single global)
+            thresholds = self.calculate_thresholds()
+            if thresholds is None or self.check_cancelled():
                 self.emit.complete(False, "Cancelled by user")
                 return False
             
-            # Step 8: Run clonality analysis
-            if not self.run_clonality_analysis(threshold):
+            # Step 8: Run clonality analysis (per timepoint or single global)
+            if not self.run_clonality_analysis(thresholds):
                 self.emit.complete(False, "Clonality analysis failed")
                 return False
             
@@ -1313,7 +1745,13 @@ class PipelineRunner:
                 self.emit.complete(False, "Cancelled by user")
                 return False
             
-            # Step 9: Build trees
+            # Step 8b: Assign C genes (isotype) via blastn
+            self.assign_c_genes()
+            
+            # Step 8c: Build cross-timepoint lineage map
+            self.build_cross_timepoint_lineages()
+            
+            # Step 9: Build trees (per timepoint or single global)
             self.emit.log("info", "About to call build_trees()...")
             if not self.build_trees():
                 self.emit.log("warn", "build_trees() returned False - continuing anyway")

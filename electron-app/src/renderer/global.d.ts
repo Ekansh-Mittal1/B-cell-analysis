@@ -2,10 +2,18 @@
  * Global type declarations for the renderer process
  */
 
+interface DetectedTimepointFolder {
+  label: string;
+  dir: string;
+  files: string[];
+}
+
 interface DirectoryResult {
   path: string;
   fileCount: number;
   files: string[];
+  /** Detected timepoint subfolders (if any) */
+  detectedTimepoints?: DetectedTimepointFolder[];
 }
 
 interface FileResult {
@@ -41,6 +49,8 @@ interface PipelineConfig {
   linkage_method?: 'single' | 'average' | 'complete';
   run_covid_matching?: boolean;
   cov_abdab_database_path?: string;
+  study_name?: string;
+  timepoints?: { label: string; files: string[] }[];
 }
 
 interface ProgressData {
@@ -62,6 +72,7 @@ interface ResultData {
 
 interface ThresholdRequestData {
   calculated: number;
+  timepoint_thresholds?: { label: string; calculated: number }[];
 }
 
 interface CompleteData {
@@ -82,14 +93,16 @@ interface ElectronAPI {
   // App info
   getPaths: () => Promise<AppPaths>;
   getDefaultDatabases: () => Promise<DatabasePaths>;
+  getCovidDatabase: () => Promise<string | null>;
 
   // Pipeline operations
   startPipeline: (config: PipelineConfig) => Promise<{ success: boolean; error?: string }>;
-  sendThresholdResponse: (value: number) => Promise<void>;
+  sendThresholdResponse: (value: number | Record<string, number>) => Promise<void>;
   cancelPipeline: () => Promise<void>;
+  stageFiles: (timepoints: { label: string; files: string[] }[], studyName: string) => Promise<{ success: boolean; stagingDir?: string; timepointMapping?: any; error?: string }>;
 
   // Load results from a previous run
-  loadResults: (outputDir: string) => Promise<void>;
+  loadResults: (outputDir: string, savePrevious?: { outputDir: string; design: any }) => Promise<void>;
 
   // Public clone analysis
   runPublicCloneAnalysis: (config: {

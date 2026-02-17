@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { currentView, analysisState, resultsState, wizardState, processSequenceResults, processDlSequenceResults, addLog, setProgress, saveSession, getSessions } from './lib/stores/app';
+  import { get } from 'svelte/store';
+  import { currentView, analysisState, resultsState, wizardState, studyDesign, processSequenceResults, processDlSequenceResults, addLog, setProgress, saveSession, getSessions, resetWizard, saveStudyDesignImmediate } from './lib/stores/app';
   import Wizard from './routes/wizard/Wizard.svelte';
   import Results from './routes/results/Results.svelte';
   import ThresholdDialog from './lib/components/ThresholdDialog.svelte';
@@ -55,7 +56,12 @@
       
       console.log('[App] Restoring results from', latest.outputDir);
       if (sessionSidebar) sessionSidebar.collapse();
-      analysisState.update(s => ({ ...s, isRunning: true, isSessionLoad: true }));
+      analysisState.update(s => ({
+        ...s,
+        isRunning: true,
+        isSessionLoad: true,
+        pendingLoadOutputDir: latest.outputDir
+      }));
       currentView.set('results');
       
       await window.electronAPI.loadResults(latest.outputDir);
@@ -92,7 +98,8 @@
               ...s,
               treeImages: [],
               treeMetadata: [],
-              fileIdMapping: {}
+              fileIdMapping: {},
+              timepointMapping: {}
             }));
             if (sessionSidebar) sessionSidebar.clearActive();
           }
@@ -108,9 +115,24 @@
       
       cleanupFns.push(
         window.electronAPI.onPipelineResult((data) => {
-          console.log('[App] Received result event:', data);
+          console.log('[App] Received result event:', data.artifact, data.data ? '(has data)' : '(no data)');
           if (data.artifact === 'sequences' && data.data) {
-            processSequenceResults(data.data);
+            // During session load: only accept results for the session we're loading
+            const pending = $analysisState.pendingLoadOutputDir;
+            if (pending) {
+              const received = (data.data.output_dir || '').replace(/\/$/, '');
+              const expected = pending.replace(/\/$/, '');
+              if (received && expected && received !== expected) {
+                console.log('[App] Ignoring stale sequences result for', received, '- expected', expected);
+                return;
+              }
+            }
+            try {
+              processSequenceResults(data.data);
+              console.log('[App] processSequenceResults OK, sequences:', data.data.sequences?.length, 'file_groups:', Object.keys(data.data.file_groups || {}).length);
+            } catch (e) {
+              console.error('[App] processSequenceResults failed:', e);
+            }
             // Capture output directory
             if (data.data.output_dir) {
               console.log('[App] Storing output directory:', data.data.output_dir);
@@ -145,32 +167,45 @@
               isAnalyzingCovidMatching: false
             }));
           }
+          if (data.artifact === 'timepoint_mapping' && data.data) {
+            console.log('[App] Received timepoint_mapping artifact with', Object.keys(data.data).length, 'entries');
+            console.log('[App] Sample entries:', Object.entries(data.data).slice(0, 3));
+            resultsState.update(s => ({
+              ...s,
+              timepointMapping: data.data
+            }));
+            console.log('[App] timepointMapping stored in resultsState');
+          }
+          if (data.artifact === 'study_design' && data.data) {
+            const design = data.data;
+            if (design && (design.groups?.length > 0 || (design.unassigned && design.unassigned.length >= 0))) {
+              studyDesign.set({
+                groups: design.groups || [],
+                unassigned: design.unassigned || []
+              });
+            }
+          }
         })
       );
       
       console.log('[App] About to register threshold request listener...');
       const thresholdCleanup = window.electronAPI.onThresholdRequest((data) => {
-        console.log('[App] ========================================');
-        console.log('[App] THRESHOLD REQUEST CALLBACK FIRED!');
-        console.log('[App] Threshold request received in callback:', data);
-        console.log('[App] Current thresholdRequest state before update:', $analysisState.thresholdRequest);
-        console.log('[App] Calculated value:', data.calculated);
-        console.log('[App] ========================================');
+        console.log('[App] THRESHOLD REQUEST received:', data);
         
+        // Support both formats:
+        //   Old: { calculated: number }
+        //   New: { timepoint_thresholds: [{label, calculated}, ...] }
         analysisState.update(s => {
-          console.log('[App] Inside update function, old thresholdRequest:', s.thresholdRequest);
-          const newState = {
-            ...s,
-            thresholdRequest: data.calculated
-          };
-          console.log('[App] New state:', newState);
-          return newState;
+          let thresholdValue: number | { label: string; calculated: number }[];
+          if (data.timepoint_thresholds && Array.isArray(data.timepoint_thresholds)) {
+            thresholdValue = data.timepoint_thresholds;
+            console.log('[App] Multi-timepoint thresholds:', thresholdValue);
+          } else {
+            thresholdValue = data.calculated;
+            console.log('[App] Single threshold:', thresholdValue);
+          }
+          return { ...s, thresholdRequest: thresholdValue };
         });
-        
-        // Force a check after update
-        setTimeout(() => {
-          console.log('[App] After state update, thresholdRequest is now:', $analysisState.thresholdRequest);
-        }, 100);
       });
       console.log('[App] Threshold request listener registered successfully');
       console.log('[App] Cleanup function type:', typeof thresholdCleanup);
@@ -184,21 +219,63 @@
             ...s,
             isRunning: false,
             isSessionLoad: false,
+            pendingLoadOutputDir: null,
             error: data.error || null
           }));
           
           if (data.success && !wasSessionLoad) {
             currentView.set('results');
+            
+            // Populate StudyDesign from wizard timepoints (single group = the study)
+            // Use setTimeout to ensure timepoint_mapping artifact has been processed
+            setTimeout(() => {
+              const wizard = get(wizardState);
+              const results = get(resultsState);
+              
+              if (wizard.timepoints.length > 0) {
+                const timepointMapping = results.timepointMapping || {};
+                const tpLabels = wizard.timepoints.map(tp => tp.label);
+                
+                console.log('[App] Populating study design with', tpLabels.length, 'timepoints');
+                console.log('[App] timepointMapping has', Object.keys(timepointMapping).length, 'entries');
+                
+                // Build a single group (the study) with timepoints
+                const group = {
+                  id: Math.random().toString(36).slice(2, 8),
+                  name: wizard.studyName || 'Study',
+                  color: '#4F46E5',
+                  timepoints: tpLabels.map((label, idx) => {
+                    const filesForTp = Object.entries(timepointMapping)
+                      .filter(([, entry]) => entry.timepoint === label)
+                      .map(([stagedFile]) => stagedFile);
+                    console.log('[App] Timepoint', label, 'has', filesForTp.length, 'files');
+                    return { id: Math.random().toString(36).slice(2, 8), label, order: idx, files: filesForTp };
+                  })
+                };
+                
+                const newDesign = {
+                  groups: [group],
+                  unassigned: [] as string[]
+                };
+                console.log('[App] Setting study design:', newDesign);
+                studyDesign.set(newDesign);
+                saveStudyDesignImmediate(newDesign);
+              }
+            }, 100);
+            
             // Save session for history / restore after sleep
             const outputDir = $resultsState.outputDir;
             if (outputDir) {
               const dirName = outputDir.split('/').pop() || 'Untitled';
+              const design = $studyDesign;
               saveSession({
                 name: dirName,
                 outputDir,
                 date: new Date().toISOString(),
                 fileCount: lastFileCount || Object.keys($resultsState.fileIdMapping).length,
-                fastaDir: lastFastaDir || $wizardState.fastaDir || ''
+                fastaDir: lastFastaDir || '',
+                studyName: $wizardState.studyName || '',
+                ...(design?.groups?.length ? { studyDesign: design } : {})
               });
               // Refresh sidebar and highlight the new session
               if (sessionSidebar) {
@@ -223,8 +300,9 @@
       console.log('[App] All event listeners set up successfully');
       console.log('[App] Total cleanup functions:', cleanupFns.length);
       
-      // Attempt restore if we have persisted output dir (e.g. after sleep/minimize reload)
-      tryRestoreFromStorage();
+      // Disabled: auto-restore was racing with manual session selection and could load wrong session.
+      // User can select a session from history sidebar instead.
+      // tryRestoreFromStorage();
     } else {
       console.error('[App] electronAPI not available in onMount!');
     }
@@ -244,18 +322,18 @@
     }
   }
   
-  function handleThresholdConfirm(value: number) {
+  function handleThresholdConfirm(value: number | Record<string, number>) {
     console.log('[App] handleThresholdConfirm called with value:', value);
     if (window.electronAPI) {
-      console.log('[App] Sending threshold response via electronAPI');
-      window.electronAPI.sendThresholdResponse(value);
-    } else {
-      console.error('[App] electronAPI not available!');
+      if (typeof value === 'object' && value !== null) {
+        // Multi-timepoint: send {thresholds: {T1: 0.12, T2: 0.15, ...}}
+        window.electronAPI.sendThresholdResponse(value);
+      } else {
+        // Single value (legacy)
+        window.electronAPI.sendThresholdResponse(value);
+      }
     }
-    analysisState.update(s => ({
-      ...s,
-      thresholdRequest: null
-    }));
+    analysisState.update(s => ({ ...s, thresholdRequest: null }));
   }
   
   let showFileIdTooltip = false;
@@ -278,19 +356,20 @@
   }
   
   function handleThresholdCancel() {
-    // Use the calculated value
-    const calculated = $analysisState.thresholdRequest;
-    console.log('[App] handleThresholdCancel called, using calculated:', calculated);
-    if (calculated !== null && window.electronAPI) {
-      console.log('[App] Sending threshold response (cancel) via electronAPI');
-      window.electronAPI.sendThresholdResponse(calculated);
-    } else {
-      console.error('[App] electronAPI not available or calculated is null!');
+    const req = $analysisState.thresholdRequest;
+    if (req !== null && window.electronAPI) {
+      if (Array.isArray(req)) {
+        // Multi-timepoint: send calculated values
+        const thresholds: Record<string, number> = {};
+        for (const tp of req) {
+          thresholds[tp.label] = tp.calculated;
+        }
+        window.electronAPI.sendThresholdResponse(thresholds);
+      } else {
+        window.electronAPI.sendThresholdResponse(req);
+      }
     }
-    analysisState.update(s => ({
-      ...s,
-      thresholdRequest: null
-    }));
+    analysisState.update(s => ({ ...s, thresholdRequest: null }));
   }
 </script>
 
@@ -329,7 +408,7 @@
         {#if $currentView === 'results'}
           <button 
             class="btn btn-ghost btn-sm"
-            on:click={() => currentView.set('wizard')}
+            on:click={() => { resetWizard(); currentView.set('wizard'); }}
           >
             ← New Analysis
           </button>
@@ -353,7 +432,8 @@
   <!-- Threshold dialog -->
   {#if $analysisState.thresholdRequest !== null}
     <ThresholdDialog
-      calculatedValue={$analysisState.thresholdRequest}
+      calculatedValue={typeof $analysisState.thresholdRequest === 'number' ? $analysisState.thresholdRequest : 0}
+      timepointThresholds={Array.isArray($analysisState.thresholdRequest) ? $analysisState.thresholdRequest : []}
       on:confirm={(e) => handleThresholdConfirm(e.detail)}
       on:cancel={handleThresholdCancel}
     />

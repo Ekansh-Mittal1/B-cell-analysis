@@ -11,6 +11,7 @@ interface DirectoryResult {
   path: string;
   fileCount: number;
   files: string[];
+  detectedTimepoints?: { label: string; dir: string; files: string[] }[];
 }
 
 interface FileResult {
@@ -69,18 +70,24 @@ const api = {
   getDefaultDatabases: (): Promise<DatabasePaths> => 
     ipcRenderer.invoke('app:getDefaultDatabases'),
 
+  getCovidDatabase: (): Promise<string | null> =>
+    ipcRenderer.invoke('app:getCovidDatabase'),
+
   // Pipeline operations
   startPipeline: (config: PipelineConfig): Promise<{ success: boolean; error?: string }> => 
     ipcRenderer.invoke('pipeline:start', config),
   
-  sendThresholdResponse: (value: number): Promise<void> => 
+  sendThresholdResponse: (value: number | Record<string, number>): Promise<void> => 
     ipcRenderer.invoke('pipeline:thresholdResponse', value),
   
   cancelPipeline: (): Promise<void> => 
     ipcRenderer.invoke('pipeline:cancel'),
 
-  loadResults: (outputDir: string): Promise<{ success: boolean; error?: string }> =>
-    ipcRenderer.invoke('pipeline:loadResults', outputDir),
+  stageFiles: (timepoints: { label: string; files: string[] }[], studyName: string): Promise<{ success: boolean; stagingDir?: string; timepointMapping?: any; error?: string }> =>
+    ipcRenderer.invoke('pipeline:stageFiles', timepoints, studyName),
+
+  loadResults: (outputDir: string, savePrevious?: { outputDir: string; design: any }): Promise<{ success: boolean; error?: string }> =>
+    ipcRenderer.invoke('pipeline:loadResults', outputDir, savePrevious),
 
   // Public clone analysis
   runPublicCloneAnalysis: (config: {
@@ -111,7 +118,7 @@ const api = {
     return () => ipcRenderer.removeListener('pipeline:result', handler);
   },
   
-  onThresholdRequest: (callback: (data: { calculated: number }) => void) => {
+  onThresholdRequest: (callback: (data: { calculated: number; timepoint_thresholds?: { label: string; calculated: number }[] }) => void) => {
     console.log('[Preload] Setting up onThresholdRequest listener');
     const handler = (_: any, data: any) => {
       console.log('[Preload] Received pipeline:threshold-request event:', data);

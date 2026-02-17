@@ -1,50 +1,73 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { resultsState } from '../../lib/stores/app';
+  import type { TreeMetadata } from '../../lib/stores/app';
   import InteractiveTree from './InteractiveTree.svelte';
   
   let selectedTreeIndex = 0;
   let isLoading = false;
+  
+  interface TimepointTreeGroup {
+    label: string;
+    trees: { index: number; metadata: TreeMetadata; path: string }[];
+  }
+  
+  // Group trees by timepoint
+  $: hasTimepoints = $resultsState.treeMetadata.some(m => m.timepoint);
+  
+  $: timepointGroups = buildTimepointGroups($resultsState.treeMetadata, $resultsState.treeImages);
+  
+  let tpExpanded: Record<string, boolean> = {};
+  
+  function buildTimepointGroups(metadata: TreeMetadata[], images: string[]): TimepointTreeGroup[] {
+    if (!metadata.length || !metadata.some(m => m.timepoint)) return [];
+    
+    const groups: Record<string, TimepointTreeGroup> = {};
+    for (let i = 0; i < metadata.length; i++) {
+      const m = metadata[i];
+      const tp = m.timepoint || 'Other';
+      if (!groups[tp]) {
+        groups[tp] = { label: tp, trees: [] };
+        if (!(tp in tpExpanded)) {
+          tpExpanded[tp] = true; // Default expanded
+        }
+      }
+      groups[tp].trees.push({ index: i, metadata: m, path: images[i] || m.path });
+    }
+    
+    // Sort groups by label (T1, T2, T3...)
+    return Object.values(groups).sort((a, b) => a.label.localeCompare(b.label, undefined, { numeric: true }));
+  }
+  
+  function toggleTpGroup(label: string) {
+    tpExpanded[label] = !tpExpanded[label];
+    tpExpanded = { ...tpExpanded };
+  }
   
   onMount(async () => {
     console.log('[PhylogeneticTrees] Mounted with', $resultsState.treeImages.length, 'trees');
   });
   
   function getNewickPath(pngPath: string): string {
-    // Normalize path: replace .png with .newick and resolve any ../ paths
     let newickPath = pngPath.replace('.png', '.newick');
-    // If path contains ../, we need to resolve it properly
-    // The backend should send absolute paths, but handle relative paths just in case
-    if (newickPath.includes('../')) {
-      // For now, just return as-is - the backend should send absolute paths
-      // If there are still issues, we may need to resolve relative to outputDir
-      console.warn('[PhylogeneticTrees] Newick path contains ../:', newickPath);
-    }
     return newickPath;
   }
   
   function getTreeName(path: string, index: number): string {
-    // Try to get metadata for better naming
     const metadata = $resultsState.treeMetadata?.[index];
     
     if (metadata && metadata.clone_id !== null) {
       const cloneId = metadata.clone_id;
       const cloneSize = metadata.clone_size;
-      
       if (cloneSize > 0) {
-        return `Clone ${cloneId} (${cloneSize} sequences)`;
-      } else {
-        return `Clone ${cloneId}`;
+        return `Clone ${cloneId} (${cloneSize} seqs)`;
       }
+      return `Clone ${cloneId}`;
     }
     
-    // Fallback to filename-based naming
     const filename = path.split('/').pop() || '';
     const match = filename.match(/tree_(\d+)/);
-    if (match) {
-      return `Clone ${match[1]}`;
-    }
-    
+    if (match) return `Clone ${match[1]}`;
     return filename.replace('.png', '').replace(/_/g, ' ');
   }
   
@@ -73,18 +96,44 @@
           <span class="tree-count">{$resultsState.treeImages.length}</span>
         </div>
         <div class="tree-list">
-          {#each $resultsState.treeImages as treePath, index}
-            <button 
-              class="tree-item"
-              class:selected={selectedTreeIndex === index}
-              on:click={() => selectedTreeIndex = index}
-            >
-              <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-                <path d="M8 2v4M8 6H4v4M8 6h4v4M4 10v4M12 10v4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-              </svg>
-              <span class="tree-name">{getTreeName(treePath, index)}</span>
-            </button>
-          {/each}
+          {#if hasTimepoints && timepointGroups.length > 0}
+            {#each timepointGroups as group}
+              <button class="tp-group-header" on:click={() => toggleTpGroup(group.label)}>
+                <svg class="tp-chevron" class:expanded={tpExpanded[group.label] !== false} width="12" height="12" viewBox="0 0 12 12" fill="none">
+                  <path d="M4 2l4 4-4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+                <span class="tp-group-label">{group.label}</span>
+                <span class="tp-group-count">{group.trees.length}</span>
+              </button>
+              {#if tpExpanded[group.label] !== false}
+                {#each group.trees as tree}
+                  <button 
+                    class="tree-item tree-item-nested"
+                    class:selected={selectedTreeIndex === tree.index}
+                    on:click={() => selectedTreeIndex = tree.index}
+                  >
+                    <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                      <path d="M8 2v4M8 6H4v4M8 6h4v4M4 10v4M12 10v4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                    </svg>
+                    <span class="tree-name">{getTreeName(tree.path, tree.index)}</span>
+                  </button>
+                {/each}
+              {/if}
+            {/each}
+          {:else}
+            {#each $resultsState.treeImages as treePath, index}
+              <button 
+                class="tree-item"
+                class:selected={selectedTreeIndex === index}
+                on:click={() => selectedTreeIndex = index}
+              >
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                  <path d="M8 2v4M8 6H4v4M8 6h4v4M4 10v4M12 10v4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                </svg>
+                <span class="tree-name">{getTreeName(treePath, index)}</span>
+              </button>
+            {/each}
+          {/if}
         </div>
       </aside>
       
@@ -378,6 +427,54 @@
     overflow: hidden;
     display: flex;
     flex-direction: column;
+  }
+  
+  .tp-group-header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    width: 100%;
+    padding: var(--space-2) var(--space-3);
+    background: var(--gray-50);
+    border: none;
+    border-radius: var(--border-radius-md);
+    font-size: var(--text-sm);
+    font-weight: var(--font-semibold);
+    color: var(--text-primary);
+    text-align: left;
+    cursor: pointer;
+    margin-bottom: 2px;
+    transition: background var(--transition-fast);
+  }
+  
+  .tp-group-header:hover {
+    background: var(--gray-100);
+  }
+  
+  .tp-chevron {
+    flex-shrink: 0;
+    transition: transform var(--transition-fast);
+  }
+  
+  .tp-chevron.expanded {
+    transform: rotate(90deg);
+  }
+  
+  .tp-group-label {
+    flex: 1;
+  }
+  
+  .tp-group-count {
+    padding: 1px 6px;
+    background: var(--color-primary-light);
+    color: var(--color-primary);
+    border-radius: var(--border-radius-full);
+    font-size: 10px;
+    font-weight: var(--font-semibold);
+  }
+  
+  .tree-item-nested {
+    padding-left: var(--space-6);
   }
   
 </style>

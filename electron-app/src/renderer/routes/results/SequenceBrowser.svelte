@@ -1,27 +1,130 @@
 <script lang="ts">
-  import { resultsState, filteredFileGroups, sequenceSearchQuery, toggleFileGroup, toggleCloneGroup, selectSequence } from '../../lib/stores/app';
+  import { resultsState, filteredFileGroups, sequenceSearchQuery, toggleFileGroup, toggleCloneGroup, selectSequence, type FileGroup, type TimepointMapping } from '../../lib/stores/app';
   
   // Function to clean the sequence name for display (remove file ID suffix)
   function cleanSequenceName(name: string): string {
-    // Legacy format: |||filename.fasta
     if (name.includes('|||')) {
       return name.split('|||')[0];
     }
-    // New format: numeric file ID suffix _XXXX (4+ digits, >= 1001)
     const match = name.match(/^(.+)_(\d{4,})$/);
     if (match && parseInt(match[2]) >= 1001) {
       return match[1];
     }
-    // Fallback for old format with _ delimiter
     if (name.includes('_') && (name.endsWith('.fasta') || name.endsWith('.fa'))) {
       const parts = name.split('_');
-      // Remove the last part if it looks like a filename
       if (parts[parts.length - 1].includes('.fasta') || parts[parts.length - 1].includes('.fa')) {
         return parts.slice(0, -1).join('_');
       }
     }
     return name;
   }
+
+  interface TimepointGroup {
+    label: string;
+    expanded: boolean;
+    fileGroups: FileGroup[];
+    totalSeqs: number;
+  }
+
+  // Build timepoint groups from filtered file groups + mapping
+  function buildTimepointGroups(fileGroups: FileGroup[], tpMapping: TimepointMapping): TimepointGroup[] {
+    if (!tpMapping || Object.keys(tpMapping).length === 0) {
+      console.log('[SequenceBrowser] buildTimepointGroups: empty mapping, returning []');
+      return [];
+    }
+
+    console.log('[SequenceBrowser] buildTimepointGroups called with', fileGroups.length, 'file groups and', Object.keys(tpMapping).length, 'mapping entries');
+
+    const tpMap = new Map<string, FileGroup[]>();
+    const unmapped: FileGroup[] = [];
+
+    for (const fg of fileGroups) {
+      // Try to find the timepoint for this file
+      const entry = tpMapping[fg.filename];
+      if (entry) {
+        const label = entry.timepoint;
+        if (!tpMap.has(label)) tpMap.set(label, []);
+        tpMap.get(label)!.push(fg);
+      } else {
+        console.log('[SequenceBrowser] File not in mapping:', fg.filename);
+        unmapped.push(fg);
+      }
+    }
+
+    console.log('[SequenceBrowser] Mapped to timepoints:', Array.from(tpMap.keys()));
+    console.log('[SequenceBrowser] Unmapped files:', unmapped.length);
+
+    const groups: TimepointGroup[] = [];
+    // Preserve timepoint order from mapping (insertion order)
+    const seenLabels = new Set<string>();
+    for (const entry of Object.values(tpMapping)) {
+      if (!seenLabels.has(entry.timepoint)) {
+        seenLabels.add(entry.timepoint);
+        const fgs = tpMap.get(entry.timepoint) || [];
+        if (fgs.length > 0) {
+          groups.push({
+            label: entry.timepoint,
+            expanded: true,
+            fileGroups: fgs,
+            totalSeqs: fgs.reduce((sum, fg) => sum + fg.sequences.length, 0)
+          });
+        }
+      }
+    }
+
+    if (unmapped.length > 0) {
+      groups.push({
+        label: 'Unassigned',
+        expanded: true,
+        fileGroups: unmapped,
+        totalSeqs: unmapped.reduce((sum, fg) => sum + fg.sequences.length, 0)
+      });
+    }
+
+    console.log('[SequenceBrowser] Built', groups.length, 'timepoint groups');
+    return groups;
+  }
+
+  // Toggle timepoint expansion
+  let timepointExpanded: Record<string, boolean> = {};
+  
+  function toggleTimepoint(label: string) {
+    const currentState = timepointExpanded[label] !== false; // default to true if undefined
+    console.log('[SequenceBrowser] toggleTimepoint:', label, 'from', currentState, 'to', !currentState);
+    timepointExpanded = { ...timepointExpanded, [label]: !currentState };
+  }
+
+  $: hasTimepointMapping = Object.keys($resultsState.timepointMapping).length > 0;
+  $: {
+    console.log('[SequenceBrowser] timepointMapping keys:', Object.keys($resultsState.timepointMapping).length);
+    console.log('[SequenceBrowser] hasTimepointMapping:', hasTimepointMapping);
+    console.log('[SequenceBrowser] filteredFileGroups count:', $filteredFileGroups.length);
+    if (hasTimepointMapping && $filteredFileGroups.length > 0) {
+      console.log('[SequenceBrowser] Sample file group:', $filteredFileGroups[0]?.filename);
+      console.log('[SequenceBrowser] Sample mapping entry:', Object.entries($resultsState.timepointMapping)[0]);
+    }
+  }
+  $: timepointGroups = hasTimepointMapping ? buildTimepointGroups($filteredFileGroups, $resultsState.timepointMapping) : [];
+  $: {
+    console.log('[SequenceBrowser] timepointExpanded state:', timepointExpanded);
+  }
+
+  // Initialize timepoint expansion states (all expanded by default)
+  $: if (timepointGroups.length > 0) {
+    let needsUpdate = false;
+    const newState = { ...timepointExpanded };
+    for (const tg of timepointGroups) {
+      if (newState[tg.label] === undefined) {
+        newState[tg.label] = true;
+        needsUpdate = true;
+      }
+    }
+    if (needsUpdate) {
+      timepointExpanded = newState;
+    }
+  }
+
+  // Removed isTpExpanded function - use timepointExpanded[label] directly in template for reactivity
 </script>
 
 <div class="sequence-browser">
@@ -51,94 +154,191 @@
     </div>
   </div>
   
-  <!-- File groups list -->
+  <!-- Groups list: Timepoint > File > Clone > Sequence if mapping present, else File > Clone > Sequence -->
   <div class="groups-list">
-    {#each $filteredFileGroups as group}
-      <div class="file-group">
-        <!-- Group header -->
-        <button 
-          class="group-header"
-          on:click={() => toggleFileGroup(group.filename)}
-        >
-          <svg 
-            class="expand-icon"
-            class:expanded={group.expanded}
-            width="14" 
-            height="14" 
-            viewBox="0 0 14 14" 
-            fill="none"
+    {#if hasTimepointMapping}
+      {#each timepointGroups as tpGroup (tpGroup.label)}
+        <div class="timepoint-group">
+          <button
+            class="group-header tp-header"
+            on:click={() => toggleTimepoint(tpGroup.label)}
           >
-            <path d="M5 4l4 3-4 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-          </svg>
-          <span class="group-name">{group.filename}</span>
-          <span class="group-count">{group.sequences.length}</span>
-        </button>
-        
-        <!-- Clone groups within file (Level 1) -->
-        {#if group.expanded}
-          <div class="clones-container">
-            {#each group.cloneGroups as cloneGroup}
-              <div class="clone-group">
-                <!-- Clone header (Level 1) - always show for multi-seq clones and special folders -->
-                <button 
-                  class="group-header clone-header"
-                  on:click={() => toggleCloneGroup(group.filename, cloneGroup.cloneId)}
-                >
-                  <svg 
-                    class="expand-icon"
-                    class:expanded={cloneGroup.expanded}
-                    width="14" 
-                    height="14" 
-                    viewBox="0 0 14 14" 
-                    fill="none"
+            <svg 
+              class="expand-icon"
+              class:expanded={timepointExpanded[tpGroup.label] !== false}
+              width="14" height="14" viewBox="0 0 14 14" fill="none"
+            >
+              <path d="M5 4l4 3-4 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            <svg class="tp-icon" width="14" height="14" viewBox="0 0 14 14" fill="none">
+              <circle cx="7" cy="7" r="5.5" stroke="currentColor" stroke-width="1.2"/>
+              <path d="M7 4v3l2 1.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+            </svg>
+            <span class="group-name">{tpGroup.label}</span>
+            <span class="group-count">{tpGroup.totalSeqs}</span>
+          </button>
+
+          {#if timepointExpanded[tpGroup.label] !== false}
+            <div class="tp-children">
+              {#each tpGroup.fileGroups as group}
+                <div class="file-group">
+                  <button 
+                    class="group-header file-header"
+                    on:click={() => toggleFileGroup(group.filename)}
                   >
-                    <path d="M5 4l4 3-4 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-                  </svg>
-                  {#if cloneGroup.cloneId === -1}
-                    <span class="group-name">Singletons</span>
-                  {:else if cloneGroup.cloneId === null}
-                    <span class="group-name">No Clone</span>
-                  {:else}
-                    <span class="group-name">Clone {cloneGroup.cloneId}</span>
-                  {/if}
-                  <span class="group-count">{cloneGroup.size}</span>
-                </button>
-                
-                <!-- Sequences within clone (Level 2) -->
-                {#if cloneGroup.expanded}
-                  <div class="sequence-list nested">
-                    {#each cloneGroup.sequences as seq}
-                      <button 
-                        class="sequence-item"
-                        class:selected={$resultsState.selectedSequenceId === seq.id}
-                        on:click={() => selectSequence(seq.id)}
-                      >
-                        <div class="seq-main">
-                          <span class="seq-name">{cleanSequenceName(seq.name)}</span>
-                          <div class="badges">
-                            {#if seq.productive === false}
-                              <span class="nonproductive-badge">Non-productive</span>
+                    <svg 
+                      class="expand-icon"
+                      class:expanded={group.expanded}
+                      width="14" height="14" viewBox="0 0 14 14" fill="none"
+                    >
+                      <path d="M5 4l4 3-4 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                    <span class="group-name">{group.filename}</span>
+                    <span class="group-count">{group.sequences.length}</span>
+                  </button>
+                  
+                  {#if group.expanded}
+                    <div class="clones-container">
+                      {#each group.cloneGroups as cloneGroup}
+                        <div class="clone-group">
+                          <button 
+                            class="group-header clone-header"
+                            on:click={() => toggleCloneGroup(group.filename, cloneGroup.cloneId)}
+                          >
+                            <svg 
+                              class="expand-icon"
+                              class:expanded={cloneGroup.expanded}
+                              width="14" height="14" viewBox="0 0 14 14" fill="none"
+                            >
+                              <path d="M5 4l4 3-4 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                            </svg>
+                            {#if cloneGroup.cloneId === -1}
+                              <span class="group-name">Singletons</span>
+                            {:else if cloneGroup.cloneId === null}
+                              <span class="group-name">No Clone</span>
+                            {:else}
+                              <span class="group-name">Clone {cloneGroup.cloneId}</span>
                             {/if}
-                          </div>
+                            <span class="group-count">{cloneGroup.size}</span>
+                          </button>
+                          
+                          {#if cloneGroup.expanded}
+                            <div class="sequence-list nested">
+                              {#each cloneGroup.sequences as seq}
+                                <button 
+                                  class="sequence-item"
+                                  class:selected={$resultsState.selectedSequenceId === seq.id}
+                                  on:click={() => selectSequence(seq.id)}
+                                >
+                                  <div class="seq-main">
+                                    <span class="seq-name">{cleanSequenceName(seq.name)}</span>
+                                    <div class="badges">
+                                      {#if seq.productive === false}
+                                        <span class="nonproductive-badge">Non-productive</span>
+                                      {/if}
+                                    </div>
+                                  </div>
+                                </button>
+                              {/each}
+                            </div>
+                          {/if}
                         </div>
-                      </button>
-                    {/each}
-                  </div>
-                {/if}
-              </div>
-            {/each}
-          </div>
-        {/if}
-      </div>
+                      {/each}
+                    </div>
+                  {/if}
+                </div>
+              {/each}
+            </div>
+          {/if}
+        </div>
+      {:else}
+        <div class="empty-state">
+          {#if $sequenceSearchQuery}
+            <p>No sequences match your search</p>
+          {:else}
+            <p>No sequences available</p>
+          {/if}
+        </div>
+      {/each}
     {:else}
-      <div class="empty-state">
-        {#if $sequenceSearchQuery}
-          <p>No sequences match your search</p>
-        {:else}
-          <p>No sequences available</p>
-        {/if}
-      </div>
-    {/each}
+      <!-- Fallback: flat File > Clone > Sequence (old sessions without timepoint mapping) -->
+      {#each $filteredFileGroups as group}
+        <div class="file-group">
+          <button 
+            class="group-header"
+            on:click={() => toggleFileGroup(group.filename)}
+          >
+            <svg 
+              class="expand-icon"
+              class:expanded={group.expanded}
+              width="14" height="14" viewBox="0 0 14 14" fill="none"
+            >
+              <path d="M5 4l4 3-4 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            <span class="group-name">{group.filename}</span>
+            <span class="group-count">{group.sequences.length}</span>
+          </button>
+          
+          {#if group.expanded}
+            <div class="clones-container">
+              {#each group.cloneGroups as cloneGroup}
+                <div class="clone-group">
+                  <button 
+                    class="group-header clone-header"
+                    on:click={() => toggleCloneGroup(group.filename, cloneGroup.cloneId)}
+                  >
+                    <svg 
+                      class="expand-icon"
+                      class:expanded={cloneGroup.expanded}
+                      width="14" height="14" viewBox="0 0 14 14" fill="none"
+                    >
+                      <path d="M5 4l4 3-4 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                    {#if cloneGroup.cloneId === -1}
+                      <span class="group-name">Singletons</span>
+                    {:else if cloneGroup.cloneId === null}
+                      <span class="group-name">No Clone</span>
+                    {:else}
+                      <span class="group-name">Clone {cloneGroup.cloneId}</span>
+                    {/if}
+                    <span class="group-count">{cloneGroup.size}</span>
+                  </button>
+                  
+                  {#if cloneGroup.expanded}
+                    <div class="sequence-list nested">
+                      {#each cloneGroup.sequences as seq}
+                        <button 
+                          class="sequence-item"
+                          class:selected={$resultsState.selectedSequenceId === seq.id}
+                          on:click={() => selectSequence(seq.id)}
+                        >
+                          <div class="seq-main">
+                            <span class="seq-name">{cleanSequenceName(seq.name)}</span>
+                            <div class="badges">
+                              {#if seq.productive === false}
+                                <span class="nonproductive-badge">Non-productive</span>
+                              {/if}
+                            </div>
+                          </div>
+                        </button>
+                      {/each}
+                    </div>
+                  {/if}
+                </div>
+              {/each}
+            </div>
+          {/if}
+        </div>
+      {:else}
+        <div class="empty-state">
+          {#if $sequenceSearchQuery}
+            <p>No sequences match your search</p>
+          {:else}
+            <p>No sequences available</p>
+          {/if}
+        </div>
+      {/each}
+    {/if}
   </div>
 </div>
 
@@ -267,11 +467,43 @@
     color: var(--text-secondary);
   }
   
-  .clone-header {
-    /* Same styling as main group-header, but indented */
+  /* Timepoint header */
+  .tp-header {
+    background: var(--color-primary-light);
+    font-weight: var(--font-semibold);
+  }
+
+  .tp-header:hover {
+    background: var(--color-primary-muted, var(--gray-100));
+  }
+
+  .tp-icon {
+    color: var(--color-primary);
+    flex-shrink: 0;
+  }
+
+  .tp-children {
+    padding-left: var(--space-3);
+  }
+
+  .timepoint-group {
+    margin-bottom: var(--space-2);
+  }
+
+  /* File header inside timepoint */
+  .file-header {
     background: var(--gray-50);
     padding: var(--space-2) var(--space-3);
-    padding-left: calc(var(--space-3) + var(--space-4));  /* Extra indent for nested appearance */
+  }
+
+  .file-header:hover {
+    background: var(--gray-100);
+  }
+
+  .clone-header {
+    background: var(--gray-50);
+    padding: var(--space-2) var(--space-3);
+    padding-left: calc(var(--space-3) + var(--space-4));
   }
   
   .clone-header:hover {
@@ -361,6 +593,7 @@
     font-weight: var(--font-semibold);
     flex-shrink: 0;
   }
+
   
   .empty-state {
     padding: var(--space-8);

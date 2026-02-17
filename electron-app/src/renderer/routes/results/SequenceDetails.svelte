@@ -24,6 +24,28 @@
     }
     return name;
   }
+
+  /** Convert raw c_call (e.g. "IGHM*01") to friendly isotype name (e.g. "IgM"). */
+  function cCallToLabel(cCall: string): string {
+    const upper = cCall.toUpperCase();
+    if (upper.startsWith('IGHM')) return 'IgM';
+    if (upper.startsWith('IGHD')) return 'IgD';
+    if (upper.startsWith('IGHG')) return 'IgG';
+    if (upper.startsWith('IGHA')) return 'IgA';
+    if (upper.startsWith('IGHE')) return 'IgE';
+    return cCall; // fallback: raw value
+  }
+
+  /** Return a CSS colour class suffix for the isotype. */
+  function igColorClass(cCall: string): string {
+    const upper = cCall.toUpperCase();
+    if (upper.startsWith('IGHM')) return 'igm';
+    if (upper.startsWith('IGHD')) return 'igd';
+    if (upper.startsWith('IGHG')) return 'igg';
+    if (upper.startsWith('IGHA')) return 'iga';
+    if (upper.startsWith('IGHE')) return 'ige';
+    return '';
+  }
 </script>
 
 <div class="sequence-details">
@@ -32,19 +54,27 @@
     <div class="header-main">
       <h2 class="sequence-name">{cleanSequenceName(sequence.name)}</h2>
       <div class="header-badges">
-        {#if sequence.somatic_mutations !== null}
-          <span class="badge mutations">
-            {sequence.somatic_mutations} Somatic Mutation{sequence.somatic_mutations !== 1 ? 's' : ''}
+        {#if sequence.c_call}
+          <span
+            class="badge ig-class {igColorClass(sequence.c_call)}"
+            title="{sequence.c_call}"
+          >
+            {cCallToLabel(sequence.c_call)}
           </span>
         {/if}
         {#if sequence.isotype}
           <span 
-            class="badge isotype"
+            class="badge chain-type"
             class:heavy={sequence.isotype === 'Heavy'}
             class:kappa={sequence.isotype === 'Kappa'}
             class:lambda={sequence.isotype === 'Lambda'}
           >
-            {sequence.isotype}
+            {sequence.isotype} chain
+          </span>
+        {/if}
+        {#if sequence.somatic_mutations !== null && sequence.somatic_mutations !== undefined}
+          <span class="badge mutations">
+            {sequence.somatic_mutations} SHM
           </span>
         {/if}
       </div>
@@ -272,25 +302,38 @@
     color: var(--color-warning);
   }
   
-  .badge.isotype {
+  /* Chain type (Heavy / Kappa / Lambda) */
+  .badge.chain-type {
     background: var(--gray-100);
     color: var(--text-secondary);
   }
   
-  .badge.isotype.heavy {
+  .badge.chain-type.heavy {
     background: rgba(139, 92, 246, 0.1);
     color: #8B5CF6;
   }
   
-  .badge.isotype.kappa {
+  .badge.chain-type.kappa {
     background: rgba(16, 185, 129, 0.1);
     color: #10B981;
   }
   
-  .badge.isotype.lambda {
+  .badge.chain-type.lambda {
     background: rgba(245, 158, 11, 0.1);
     color: #F59E0B;
   }
+  
+  /* Isotype / Ig class (IgM, IgG, IgA, IgD, IgE) */
+  .badge.ig-class {
+    background: rgba(0, 102, 204, 0.1);
+    color: var(--color-primary);
+    font-weight: var(--font-semibold);
+  }
+  .badge.ig-class.igm { background: rgba(232, 93, 4, 0.12); color: #E85D04; }
+  .badge.ig-class.igd { background: rgba(155, 89, 182, 0.12); color: #9B59B6; }
+  .badge.ig-class.igg { background: rgba(0, 102, 204, 0.12); color: #0066CC; }
+  .badge.ig-class.iga { background: rgba(45, 159, 63, 0.12); color: #2D9F3F; }
+  .badge.ig-class.ige { background: rgba(231, 76, 60, 0.12); color: #E74C3C; }
   
   .details-content {
     display: grid !important;

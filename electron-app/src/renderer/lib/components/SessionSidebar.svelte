@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { currentView, analysisState, resultsState, getSessions, deleteSession, renameSession } from '../stores/app';
+  import { currentView, analysisState, resultsState, studyDesign, getSessions, deleteSession, renameSession, saveStudyDesignToOutputDir } from '../stores/app';
   import type { SessionEntry } from '../stores/app';
 
   let expanded = false;
@@ -8,7 +8,7 @@
   let renamingId: string | null = null;
   let renameValue = '';
   let confirmDeleteId: string | null = null;
-  let isLoadingSession = false;
+  let loadingSessionId: string | null = null;  // Only the session being loaded is disabled
   let activeSessionId: string | null = null;
 
   // Keep activeSessionId in sync: only when viewing results and outputDir matches a session
@@ -45,38 +45,87 @@
   function toggle() {
     expanded = !expanded;
     if (expanded) {
-      sessions = getSessions();
+      sessions = getSessions();  // Refresh to ensure we have latest session list
     }
   }
 
-  async function loadSession(session: SessionEntry) {
+  async function loadSession(outputDir: string, sessionId?: string) {
     if (!window.electronAPI?.loadResults) return;
+    // Refresh sessions from localStorage and use outputDir directly from click
+    sessions = getSessions();
+    const session = sessionId ? sessions.find(s => s.id === sessionId) : sessions.find(s => s.outputDir === outputDir);
+    const sessionName = session?.name ?? outputDir.split('/').pop() ?? 'Session';
 
-    const exists = await window.electronAPI.fileExists(session.outputDir + '/combined.fasta');
+    console.log('[SessionSidebar] Loading session:', sessionName, 'outputDir:', outputDir, 'fileCount:', session?.fileCount);
+
+    const exists = await window.electronAPI.fileExists(outputDir + '/combined.fasta');
     if (!exists) {
-      if (confirm(`The output directory for "${session.name}" no longer exists.\nRemove this session from history?`)) {
-        deleteSession(session.id);
-        sessions = getSessions();
+      if (confirm(`The output directory for "${sessionName}" no longer exists.\nRemove this session from history?`)) {
+        if (session) {
+          deleteSession(session.id);
+          sessions = getSessions();
+        }
       }
       return;
     }
 
-    isLoadingSession = true;
-    activeSessionId = session.id;
+    loadingSessionId = session?.id ?? null;
+    activeSessionId = session?.id ?? null;
     expanded = false; // Auto-collapse when loading a session
-    analysisState.update(s => ({ ...s, isRunning: true, isSessionLoad: true }));
+    const outputDirToLoad = outputDir;
+    analysisState.update(s => ({
+      ...s,
+      isRunning: true,
+      isSessionLoad: true,
+      pendingLoadOutputDir: outputDirToLoad  // Ignore results for other dirs (stale from previous load)
+    }));
     currentView.set('results');
+    // CRITICAL: Save current session's study design BEFORE clearing - once we clear outputDir,
+    // DataOrganizer unmounts (due to {#key}) and its onDestroy can't save (outputDir is null).
+    const currentOutputDir = $resultsState.outputDir;
+    const currentDesign = $studyDesign;
+    if (currentOutputDir) {
+      await saveStudyDesignToOutputDir(currentOutputDir, currentDesign);
+    }
+    const savePrevious = currentOutputDir
+      ? { outputDir: currentOutputDir, design: currentDesign }
+      : undefined;
+    // Clear previous results and study design so we don't show stale data while loading
+    resultsState.update(s => ({
+      ...s,
+      sequences: [],
+      fileGroups: [],
+      treeImages: [],
+      treeMetadata: [],
+      outputDir: null,
+      fileIdMapping: {}
+    }));
+    studyDesign.set({ groups: [], unassigned: [] });
+
+    // Safety: clear loading state after 30s even if loadResults hangs
+    const timeoutId = setTimeout(() => {
+      loadingSessionId = null;
+    }, 30000);
 
     try {
-      await window.electronAPI.loadResults(session.outputDir);
+      await window.electronAPI.loadResults(outputDirToLoad, savePrevious);
       analysisState.update(s => ({ ...s, isRunning: false }));
+      // If loader didn't find study_design.json, use session's cached design
+      if (session?.studyDesign && session.studyDesign.groups?.length > 0) {
+        const current = $studyDesign;
+        if (!current?.groups?.length) {
+          studyDesign.set(session.studyDesign);
+        }
+      }
     } catch (e) {
       console.warn('[SessionSidebar] Failed to load session:', e);
-      analysisState.update(s => ({ ...s, isRunning: false, isSessionLoad: false }));
+      analysisState.update(s => ({ ...s, isRunning: false, isSessionLoad: false, pendingLoadOutputDir: null }));
       activeSessionId = null;
       currentView.set('wizard');
     } finally {
-      isLoadingSession = false;
+      clearTimeout(timeoutId);
+      loadingSessionId = null;
+      analysisState.update(s => ({ ...s, pendingLoadOutputDir: null }));
     }
   }
 
@@ -172,10 +221,10 @@
           {#each sessions as session (session.id)}
             <div
               class="session-card"
-              class:loading={isLoadingSession}
+              class:loading={loadingSessionId === session.id}
               class:active={activeSessionId === session.id}
-              on:click={() => loadSession(session)}
-              on:keydown={(e) => e.key === 'Enter' && loadSession(session)}
+              on:click={() => loadSession(session.outputDir, session.id)}
+              on:keydown={(e) => e.key === 'Enter' && loadSession(session.outputDir, session.id)}
               role="button"
               tabindex="0"
             >
@@ -213,7 +262,7 @@
                   class="icon-btn"
                   on:click={(e) => startRename(session, e)}
                   title="Rename"
-                  disabled={isLoadingSession}
+                  disabled={loadingSessionId === session.id}
                 >
                   <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round">
                     <path d="M8.5 1.5l2 2-6 6H2.5v-2l6-6z"/>
@@ -229,7 +278,7 @@
                     class="icon-btn icon-btn-danger"
                     on:click={(e) => handleDelete(session, e)}
                     title="Delete"
-                    disabled={isLoadingSession}
+                    disabled={loadingSessionId === session.id}
                   >
                     <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round">
                       <path d="M1.5 3.5h9M4 3.5V2.5a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v1M9.5 3.5v6a1 1 0 0 1-1 1h-5a1 1 0 0 1-1-1v-6"/>
@@ -379,13 +428,14 @@
     padding: 10px 10px 8px;
     border-radius: var(--border-radius-md);
     cursor: pointer;
-    transition: background 0.12s;
-    border: 1px solid transparent;
+    transition: background 0.12s, border-color 0.12s, opacity 0.12s;
+    border: 1px solid var(--border-light);
+    background: var(--surface-raised);
   }
 
   .session-card:hover {
-    background: var(--surface-raised);
-    border-color: var(--border-light);
+    background: var(--gray-100);
+    border-color: var(--gray-300);
   }
 
   .session-card.active {
@@ -398,7 +448,7 @@
   }
 
   .session-card.loading {
-    opacity: 0.5;
+    opacity: 0.6;
     pointer-events: none;
   }
 

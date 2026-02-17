@@ -1,16 +1,32 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { wizardState, analysisState } from '../../lib/stores/app';
   import Stepper from '../../lib/components/Stepper.svelte';
-  import SelectFiles from './SelectFiles.svelte';
+  import DefineStudy from './DefineStudy.svelte';
   import ChooseDatabase from './ChooseDatabase.svelte';
   import ReviewStart from './ReviewStart.svelte';
   import ProgressOverlay from '../../lib/components/ProgressOverlay.svelte';
   
   const steps = [
-    { number: 1, label: 'Select Files' },
+    { number: 1, label: 'Define Study' },
     { number: 2, label: 'Choose Database' },
     { number: 3, label: 'Review & Start' }
   ];
+
+  onMount(async () => {
+    // Auto-populate bundled CoV-AbDab database if not already set
+    if (!$wizardState.covAbdabPath && window.electronAPI) {
+      try {
+        const covidDbPath = await window.electronAPI.getCovidDatabase();
+        if (covidDbPath) {
+          wizardState.update(s => ({ ...s, covAbdabPath: covidDbPath }));
+          console.log('[Wizard] Auto-populated CoV-AbDab database:', covidDbPath);
+        }
+      } catch (error) {
+        console.warn('[Wizard] Could not load bundled CoV-AbDab database:', error);
+      }
+    }
+  });
 </script>
 
 <div class="wizard">
@@ -46,7 +62,7 @@
   <main class="wizard-main">
     <div class="wizard-content">
       {#if $wizardState.step === 1}
-        <SelectFiles />
+        <DefineStudy />
       {:else if $wizardState.step === 2}
         <ChooseDatabase />
       {:else if $wizardState.step === 3}

@@ -45,7 +45,10 @@ def blast_get_top_hits_v(input_fp, db_V_fp, db_J_fp, db_D_fp, organism='human', 
     # Set IGDATA environment variable so igblastn can find internal_data
     env = os.environ.copy()
     env['IGDATA'] = igdata_path
-    cmd = [igblastn_path, '-germline_db_V', db_V_fp, '-germline_db_D', db_D_fp, '-germline_db_J', db_J_fp,'-query', input_fp, '-outfmt', '7 std qseq sseq btop', '-auxiliary_data', aux_data_path]#, '-out', 'ig_out_data.fmt7', "-organism", organism]
+    cmd = [igblastn_path, '-germline_db_V', db_V_fp, '-germline_db_D', db_D_fp, '-germline_db_J', db_J_fp]
+    # Note: -c_region_db requires IgBLAST >= 1.17.  C gene assignment is
+    # handled separately via blastn in pipeline_runner.assign_c_genes().
+    cmd.extend(['-query', input_fp, '-outfmt', '7 std qseq sseq btop', '-auxiliary_data', aux_data_path])
     a = subprocess.Popen(cmd, stdout=subprocess.PIPE, cwd=geneHome, env=env)
     out = a.communicate()[0].decode('utf-8')
     b = StringIO(out)

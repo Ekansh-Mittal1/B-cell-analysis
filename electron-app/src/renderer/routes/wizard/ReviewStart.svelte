@@ -1,11 +1,17 @@
 <script lang="ts">
   import { wizardState, analysisState, resetAnalysis } from '../../lib/stores/app';
   
+  let stagingError = '';
+  
   function handleBack() {
     wizardState.update(s => ({
       ...s,
       step: 2
     }));
+  }
+  
+  function totalFileCount(): number {
+    return $wizardState.timepoints.reduce((sum, tp) => sum + tp.fastaFiles.length, 0);
   }
   
   async function handleStartAnalysis() {
@@ -17,6 +23,7 @@
       return;
     }
     
+    stagingError = '';
     resetAnalysis();
     analysisState.update(s => ({
       ...s,
@@ -24,8 +31,28 @@
     }));
     
     try {
+      // Stage files from all timepoints into a flat directory
+      const timepointsForStaging = $wizardState.timepoints.map(tp => ({
+        label: tp.label,
+        files: tp.fastaFiles
+      }));
+      
+      const stageResult = await window.electronAPI.stageFiles(timepointsForStaging, $wizardState.studyName);
+      
+      if (!stageResult.success || !stageResult.stagingDir) {
+        stagingError = stageResult.error || 'Failed to stage files';
+        analysisState.update(s => ({
+          ...s,
+          isRunning: false,
+          error: stagingError
+        }));
+        return;
+      }
+      
+      console.log('[ReviewStart] Files staged to:', stageResult.stagingDir);
+      
       await window.electronAPI.startPipeline({
-        fasta_dir: $wizardState.fastaDir!,
+        fasta_dir: stageResult.stagingDir,
         clean_fasta: $wizardState.cleanFasta,
         database_type: $wizardState.databaseType,
         database_v: $wizardState.customDatabaseV || undefined,
@@ -34,7 +61,9 @@
         clone_mode: $wizardState.cloneMode,
         linkage_method: $wizardState.linkageMethod,
         run_covid_matching: $wizardState.runCovidMatching,
-        cov_abdab_database_path: $wizardState.covAbdabPath || undefined
+        cov_abdab_database_path: $wizardState.covAbdabPath || undefined,
+        study_name: $wizardState.studyName,
+        timepoints: timepointsForStaging
       });
     } catch (error: any) {
       analysisState.update(s => ({
@@ -67,10 +96,6 @@
     }
   }
   
-  function getDirectoryName(path: string): string {
-    return path.split('/').pop() || path;
-  }
-  
   function getFileName(path: string): string {
     return path.split('/').pop() || path;
   }
@@ -100,7 +125,7 @@
       </div>
       
       <div class="summary-sections">
-        <!-- Input Files Section -->
+        <!-- Study & Timepoints Section -->
         <div class="summary-section">
           <div class="section-icon">
             <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
@@ -109,20 +134,26 @@
             </svg>
           </div>
           <div class="section-content">
-            <h3 class="section-title">Input Files</h3>
+            <h3 class="section-title">Study: {$wizardState.studyName}</h3>
             <div class="section-details">
               <div class="detail-row">
-                <span class="detail-label">Directory</span>
-                <span class="detail-value">{getDirectoryName($wizardState.fastaDir || '')}</span>
+                <span class="detail-label">Timepoints</span>
+                <span class="detail-value">{$wizardState.timepoints.length}</span>
               </div>
               <div class="detail-row">
-                <span class="detail-label">Files</span>
-                <span class="detail-value">{$wizardState.fastaCount} FASTA file{$wizardState.fastaCount !== 1 ? 's' : ''}</span>
+                <span class="detail-label">Total Files</span>
+                <span class="detail-value">{totalFileCount()} FASTA file{totalFileCount() !== 1 ? 's' : ''}</span>
               </div>
               <div class="detail-row">
                 <span class="detail-label">Clean Files</span>
                 <span class="detail-value">{$wizardState.cleanFasta ? 'Yes' : 'No'}</span>
               </div>
+              {#each $wizardState.timepoints as tp}
+                <div class="detail-row">
+                  <span class="detail-label tp-indent">{tp.label}</span>
+                  <span class="detail-value">{tp.fastaFiles.length} file{tp.fastaFiles.length !== 1 ? 's' : ''}</span>
+                </div>
+              {/each}
             </div>
           </div>
           <button class="edit-btn" on:click={() => wizardState.update(s => ({...s, step: 1}))}>
@@ -277,6 +308,12 @@
         </div>
       </div>
     </div>
+    
+    {#if stagingError}
+      <div class="staging-error">
+        <strong>Staging Error:</strong> {stagingError}
+      </div>
+    {/if}
     
     <!-- Analysis steps info -->
     <div class="analysis-info">
@@ -475,6 +512,11 @@
   .detail-label {
     color: var(--text-tertiary);
     min-width: 80px;
+  }
+  
+  .detail-label.tp-indent {
+    padding-left: var(--space-3);
+    font-style: italic;
   }
   
   .detail-value {
@@ -730,6 +772,15 @@
   
   .btn-file-select:active {
     transform: translateY(1px);
+  }
+  
+  .staging-error {
+    padding: var(--space-3) var(--space-4);
+    background: var(--color-error-light, #fef2f2);
+    color: var(--color-error, #dc2626);
+    border: 1px solid var(--color-error, #dc2626);
+    border-radius: var(--border-radius-md);
+    font-size: var(--text-sm);
   }
 </style>
 

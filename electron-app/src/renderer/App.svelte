@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { get } from 'svelte/store';
-  import { currentView, analysisState, resultsState, wizardState, studyDesign, processSequenceResults, processDlSequenceResults, addLog, setProgress, saveSession, getSessions, resetWizard, saveStudyDesignImmediate } from './lib/stores/app';
+  import { currentView, analysisState, resultsState, wizardState, studyDesign, processSequenceResults, processDlSequenceResults, addLog, setProgress, saveSession, getSessions, resetWizard, saveStudyDesignImmediate, type CohortResults, type CohortType, type StudyDesign } from './lib/stores/app';
   import Wizard from './routes/wizard/Wizard.svelte';
   import Results from './routes/results/Results.svelte';
   import ThresholdDialog from './lib/components/ThresholdDialog.svelte';
@@ -12,6 +12,32 @@
   // Track fasta_dir from latest result so we can save it to session history
   let lastFastaDir = '';
   let lastFileCount = 0;
+
+  // Accumulate per-cohort results during multi-cohort pipeline runs
+  let pendingCohortResults: Map<string, Partial<CohortResults>> = new Map();
+
+  // Label for the threshold dialog when running multi-cohort
+  let thresholdCohortLabel: string = '';
+
+  function getOrCreateCohortAccum(cohortType: CohortType, cohortName?: string): Partial<CohortResults> {
+    if (!pendingCohortResults.has(cohortType)) {
+      pendingCohortResults.set(cohortType, {
+        cohortType,
+        cohortName: cohortName || cohortType,
+        sequences: [],
+        fileGroups: [],
+        treeImages: [],
+        treeMetadata: [],
+        timepointMapping: {},
+        outputDir: '',
+        fileIdMapping: {},
+        covidMatchData: null
+      });
+    }
+    const accum = pendingCohortResults.get(cohortType)!;
+    if (cohortName) accum.cohortName = cohortName;
+    return accum;
+  }
   
   
   // Event listener cleanup functions
@@ -89,19 +115,39 @@
       cleanupFns.push(
         window.electronAPI.onPipelineProgress((data) => {
           console.log('[App] Received progress event:', data);
-          setProgress(data);
+          const wizard = get(wizardState);
+          const isMultiCohort = wizard.hasControlCohort;
+
+          let scaledPercent = data.percent;
+          let displayMessage = data.message;
+
+          if (isMultiCohort && data.cohort_type) {
+            if (data.cohort_type === 'disease') {
+              scaledPercent = Math.round(data.percent / 2);
+            } else if (data.cohort_type === 'control') {
+              scaledPercent = 50 + Math.round(data.percent / 2);
+            }
+            displayMessage = `[${data.cohort_name || data.cohort_type}] ${data.message}`;
+          }
+
+          setProgress({ ...data, percent: scaledPercent, message: displayMessage });
           
-          // Clear old tree data and file mapping when a new analysis starts
+          // Clear old tree data and file mapping when a new analysis starts (only on first cohort)
           if (data.stage === 'fasta' || data.stage === 'setup') {
-            console.log('[App] New analysis starting - clearing old tree data');
-            resultsState.update(s => ({
-              ...s,
-              treeImages: [],
-              treeMetadata: [],
-              fileIdMapping: {},
-              timepointMapping: {}
-            }));
-            if (sessionSidebar) sessionSidebar.clearActive();
+            const isFirstCohort = !data.cohort_type || data.cohort_type === 'disease';
+            if (isFirstCohort) {
+              console.log('[App] New analysis starting - clearing old tree data');
+              pendingCohortResults = new Map();
+              resultsState.update(s => ({
+                ...s,
+                treeImages: [],
+                treeMetadata: [],
+                fileIdMapping: {},
+                timepointMapping: {},
+                cohortResults: []
+              }));
+              if (sessionSidebar) sessionSidebar.clearActive();
+            }
           }
         })
       );
@@ -115,7 +161,10 @@
       
       cleanupFns.push(
         window.electronAPI.onPipelineResult((data) => {
-          console.log('[App] Received result event:', data.artifact, data.data ? '(has data)' : '(no data)');
+          console.log('[App] Received result event:', data.artifact, data.data ? '(has data)' : '(no data)', data.cohort_type || '');
+          const cohortType: CohortType | undefined = data.cohort_type as CohortType | undefined;
+          const cohortName: string | undefined = data.cohort_name;
+
           if (data.artifact === 'sequences' && data.data) {
             // During session load: only accept results for the session we're loading
             const pending = $analysisState.pendingLoadOutputDir;
@@ -133,20 +182,19 @@
             } catch (e) {
               console.error('[App] processSequenceResults failed:', e);
             }
-            // Capture output directory
             if (data.data.output_dir) {
               console.log('[App] Storing output directory:', data.data.output_dir);
-              resultsState.update(s => ({
-                ...s,
-                outputDir: data.data.output_dir
-              }));
+              resultsState.update(s => ({ ...s, outputDir: data.data.output_dir }));
             }
-            // Track fasta_dir and file count for session history
-            if (data.data.fasta_dir) {
-              lastFastaDir = data.data.fasta_dir;
-            }
-            if (data.data.file_groups) {
-              lastFileCount = Object.keys(data.data.file_groups).length;
+            if (data.data.fasta_dir) lastFastaDir = data.data.fasta_dir;
+            if (data.data.file_groups) lastFileCount = Object.keys(data.data.file_groups).length;
+
+            if (cohortType) {
+              const accum = getOrCreateCohortAccum(cohortType, cohortName);
+              accum.sequences = get(resultsState).sequences;
+              accum.fileGroups = get(resultsState).fileGroups;
+              if (data.data.output_dir) accum.outputDir = data.data.output_dir;
+              if (data.data.file_id_mapping) accum.fileIdMapping = data.data.file_id_mapping;
             }
           }
           if (data.artifact === 'dl_sequences' && data.data) {
@@ -158,6 +206,11 @@
               treeImages: data.data.images,
               treeMetadata: data.data.tree_metadata || []
             }));
+            if (cohortType) {
+              const accum = getOrCreateCohortAccum(cohortType, cohortName);
+              accum.treeImages = data.data.images;
+              accum.treeMetadata = data.data.tree_metadata || [];
+            }
           }
           if (data.artifact === 'covid_matches' && data.data) {
             console.log('[App] Received COVID matching results:', data.data);
@@ -166,23 +219,31 @@
               covidMatchData: data.data,
               isAnalyzingCovidMatching: false
             }));
+            if (cohortType) {
+              const accum = getOrCreateCohortAccum(cohortType, cohortName);
+              accum.covidMatchData = data.data;
+            }
           }
           if (data.artifact === 'timepoint_mapping' && data.data) {
             console.log('[App] Received timepoint_mapping artifact with', Object.keys(data.data).length, 'entries');
-            console.log('[App] Sample entries:', Object.entries(data.data).slice(0, 3));
-            resultsState.update(s => ({
-              ...s,
-              timepointMapping: data.data
-            }));
-            console.log('[App] timepointMapping stored in resultsState');
+            resultsState.update(s => ({ ...s, timepointMapping: data.data }));
+            if (cohortType) {
+              const accum = getOrCreateCohortAccum(cohortType, cohortName);
+              accum.timepointMapping = data.data;
+            }
           }
           if (data.artifact === 'study_design' && data.data) {
             const design = data.data;
             if (design && (design.groups?.length > 0 || (design.unassigned && design.unassigned.length >= 0))) {
-              studyDesign.set({
+              const parsed: StudyDesign = {
                 groups: design.groups || [],
                 unassigned: design.unassigned || []
-              });
+              };
+              studyDesign.set(parsed);
+              if (cohortType) {
+                const accum = getOrCreateCohortAccum(cohortType, cohortName);
+                accum.studyDesign = parsed;
+              }
             }
           }
         })
@@ -191,6 +252,9 @@
       console.log('[App] About to register threshold request listener...');
       const thresholdCleanup = window.electronAPI.onThresholdRequest((data) => {
         console.log('[App] THRESHOLD REQUEST received:', data);
+
+        // Set cohort label so the dialog shows which cohort these thresholds belong to
+        thresholdCohortLabel = data.cohort_name || data.cohort_type || '';
         
         // Support both formats:
         //   Old: { calculated: number }
@@ -214,7 +278,45 @@
       cleanupFns.push(
         window.electronAPI.onPipelineComplete((data) => {
           const wasSessionLoad = $analysisState.isSessionLoad;
-          console.log('[App] Received complete event:', data, 'isSessionLoad:', wasSessionLoad);
+          const completedCohortType: CohortType | undefined = data.cohort_type as CohortType | undefined;
+          console.log('[App] Received complete event:', data, 'isSessionLoad:', wasSessionLoad, 'cohort:', completedCohortType);
+
+          if (completedCohortType && pendingCohortResults.has(completedCohortType)) {
+            const accum = pendingCohortResults.get(completedCohortType)!;
+            if (data.output_dir) accum.outputDir = data.output_dir;
+            // Snapshot current resultsState into this cohort
+            const rs = get(resultsState);
+            if (!accum.sequences?.length) accum.sequences = rs.sequences;
+            if (!accum.fileGroups?.length) accum.fileGroups = rs.fileGroups;
+            if (!accum.treeImages?.length) accum.treeImages = rs.treeImages;
+            if (!accum.treeMetadata?.length) accum.treeMetadata = rs.treeMetadata;
+            if (!Object.keys(accum.timepointMapping || {}).length) accum.timepointMapping = rs.timepointMapping;
+            if (!Object.keys(accum.fileIdMapping || {}).length) accum.fileIdMapping = rs.fileIdMapping;
+            if (!accum.studyDesign) accum.studyDesign = get(studyDesign);
+
+            resultsState.update(s => ({
+              ...s,
+              cohortResults: [
+                ...s.cohortResults.filter(c => c.cohortType !== completedCohortType),
+                accum as CohortResults
+              ]
+            }));
+            console.log('[App] Finalized cohort result:', completedCohortType);
+
+            // If we're doing a multi-cohort run and this is disease (first), don't mark as done yet
+            const wizard = get(wizardState);
+            if (wizard.hasControlCohort && completedCohortType === 'disease') {
+              console.log('[App] Disease cohort complete, waiting for control pipeline...');
+              const controlCohort = wizard.cohorts.find(c => c.type === 'control');
+              setProgress({
+                stage: 'transition',
+                percent: 50,
+                message: `Disease group complete. Starting ${controlCohort?.name || 'Control'} group...`
+              });
+              return;
+            }
+          }
+
           analysisState.update(s => ({
             ...s,
             isRunning: false,
@@ -226,8 +328,6 @@
           if (data.success && !wasSessionLoad) {
             currentView.set('results');
             
-            // Populate StudyDesign from wizard timepoints (single group = the study)
-            // Use setTimeout to ensure timepoint_mapping artifact has been processed
             setTimeout(() => {
               const wizard = get(wizardState);
               const results = get(resultsState);
@@ -236,10 +336,6 @@
                 const timepointMapping = results.timepointMapping || {};
                 const tpLabels = wizard.timepoints.map(tp => tp.label);
                 
-                console.log('[App] Populating study design with', tpLabels.length, 'timepoints');
-                console.log('[App] timepointMapping has', Object.keys(timepointMapping).length, 'entries');
-                
-                // Build a single group (the study) with timepoints
                 const group = {
                   id: Math.random().toString(36).slice(2, 8),
                   name: wizard.studyName || 'Study',
@@ -248,26 +344,25 @@
                     const filesForTp = Object.entries(timepointMapping)
                       .filter(([, entry]) => entry.timepoint === label)
                       .map(([stagedFile]) => stagedFile);
-                    console.log('[App] Timepoint', label, 'has', filesForTp.length, 'files');
                     return { id: Math.random().toString(36).slice(2, 8), label, order: idx, files: filesForTp };
                   })
                 };
                 
-                const newDesign = {
-                  groups: [group],
-                  unassigned: [] as string[]
-                };
-                console.log('[App] Setting study design:', newDesign);
+                const newDesign = { groups: [group], unassigned: [] as string[] };
                 studyDesign.set(newDesign);
                 saveStudyDesignImmediate(newDesign);
               }
             }, 100);
             
-            // Save session for history / restore after sleep
             const outputDir = $resultsState.outputDir;
             if (outputDir) {
               const dirName = outputDir.split('/').pop() || 'Untitled';
               const design = $studyDesign;
+              const cohortEntries = $resultsState.cohortResults.map(c => ({
+                cohortType: c.cohortType,
+                cohortName: c.cohortName,
+                outputDir: c.outputDir
+              }));
               saveSession({
                 name: dirName,
                 outputDir,
@@ -275,12 +370,10 @@
                 fileCount: lastFileCount || Object.keys($resultsState.fileIdMapping).length,
                 fastaDir: lastFastaDir || '',
                 studyName: $wizardState.studyName || '',
-                ...(design?.groups?.length ? { studyDesign: design } : {})
+                ...(design?.groups?.length ? { studyDesign: design } : {}),
+                ...(cohortEntries.length > 0 ? { cohorts: cohortEntries } : {})
               });
-              // Refresh sidebar and highlight the new session
-              if (sessionSidebar) {
-                sessionSidebar.refresh();
-              }
+              if (sessionSidebar) sessionSidebar.refresh();
             }
           }
         })
@@ -325,14 +418,9 @@
   function handleThresholdConfirm(value: number | Record<string, number>) {
     console.log('[App] handleThresholdConfirm called with value:', value);
     if (window.electronAPI) {
-      if (typeof value === 'object' && value !== null) {
-        // Multi-timepoint: send {thresholds: {T1: 0.12, T2: 0.15, ...}}
-        window.electronAPI.sendThresholdResponse(value);
-      } else {
-        // Single value (legacy)
-        window.electronAPI.sendThresholdResponse(value);
-      }
+      window.electronAPI.sendThresholdResponse(value);
     }
+    thresholdCohortLabel = '';
     analysisState.update(s => ({ ...s, thresholdRequest: null }));
   }
   
@@ -355,22 +443,6 @@
     }
   }
   
-  function handleThresholdCancel() {
-    const req = $analysisState.thresholdRequest;
-    if (req !== null && window.electronAPI) {
-      if (Array.isArray(req)) {
-        // Multi-timepoint: send calculated values
-        const thresholds: Record<string, number> = {};
-        for (const tp of req) {
-          thresholds[tp.label] = tp.calculated;
-        }
-        window.electronAPI.sendThresholdResponse(thresholds);
-      } else {
-        window.electronAPI.sendThresholdResponse(req);
-      }
-    }
-    analysisState.update(s => ({ ...s, thresholdRequest: null }));
-  }
 </script>
 
 <svelte:window on:click={handleClickOutside} />
@@ -378,7 +450,7 @@
   <!-- Header with drag region for macOS -->
   <header class="app-header">
     <div class="header-content">
-      <h1 class="app-title">B-Cell Repertoire Analysis</h1>
+      <h1 class="app-title">Clono</h1>
       
       <div class="header-actions">
         {#if $currentView === 'results' && Object.keys($resultsState.fileIdMapping).length > 0}
@@ -434,8 +506,8 @@
     <ThresholdDialog
       calculatedValue={typeof $analysisState.thresholdRequest === 'number' ? $analysisState.thresholdRequest : 0}
       timepointThresholds={Array.isArray($analysisState.thresholdRequest) ? $analysisState.thresholdRequest : []}
+      cohortLabel={thresholdCohortLabel}
       on:confirm={(e) => handleThresholdConfirm(e.detail)}
-      on:cancel={handleThresholdCancel}
     />
   {/if}
 </div>

@@ -1,10 +1,11 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { resultsState } from '../../lib/stores/app';
+  import { resultsState, type CohortResults } from '../../lib/stores/app';
   import type { TreeMetadata } from '../../lib/stores/app';
   import InteractiveTree from './InteractiveTree.svelte';
   
   let selectedTreeIndex = 0;
+  let selectedCohortType: string | null = null;
   let isLoading = false;
   
   interface TimepointTreeGroup {
@@ -18,7 +19,21 @@
   $: timepointGroups = buildTimepointGroups($resultsState.treeMetadata, $resultsState.treeImages);
   
   let tpExpanded: Record<string, boolean> = {};
+  let cohortExpanded: Record<string, boolean> = {};
   
+  $: hasCohorts = $resultsState.cohortResults.length > 0;
+  
+  $: if (hasCohorts) {
+    for (const cr of $resultsState.cohortResults) {
+      if (!(cr.cohortType in cohortExpanded)) cohortExpanded[cr.cohortType] = true;
+    }
+  }
+
+  function toggleCohortExpand(type: string) {
+    cohortExpanded[type] = !cohortExpanded[type];
+    cohortExpanded = { ...cohortExpanded };
+  }
+
   function buildTimepointGroups(metadata: TreeMetadata[], images: string[]): TimepointTreeGroup[] {
     if (!metadata.length || !metadata.some(m => m.timepoint)) return [];
     
@@ -29,52 +44,77 @@
       if (!groups[tp]) {
         groups[tp] = { label: tp, trees: [] };
         if (!(tp in tpExpanded)) {
-          tpExpanded[tp] = true; // Default expanded
+          tpExpanded[tp] = true;
         }
       }
       groups[tp].trees.push({ index: i, metadata: m, path: images[i] || m.path });
     }
     
-    // Sort groups by label (T1, T2, T3...)
     return Object.values(groups).sort((a, b) => a.label.localeCompare(b.label, undefined, { numeric: true }));
+  }
+  
+  function buildCohortTimepointGroups(cohort: CohortResults): TimepointTreeGroup[] {
+    return buildTimepointGroups(cohort.treeMetadata, cohort.treeImages);
   }
   
   function toggleTpGroup(label: string) {
     tpExpanded[label] = !tpExpanded[label];
     tpExpanded = { ...tpExpanded };
   }
+
+  function selectCohortTree(cohortType: string, index: number) {
+    selectedCohortType = cohortType;
+    selectedTreeIndex = index;
+  }
+
+  function selectDefaultTree(index: number) {
+    selectedCohortType = null;
+    selectedTreeIndex = index;
+  }
+
+  $: activeTreeMetadata = (() => {
+    if (selectedCohortType && hasCohorts) {
+      const cohort = $resultsState.cohortResults.find(c => c.cohortType === selectedCohortType);
+      return cohort?.treeMetadata || [];
+    }
+    return $resultsState.treeMetadata;
+  })();
+
+  $: activeTreeImages = (() => {
+    if (selectedCohortType && hasCohorts) {
+      const cohort = $resultsState.cohortResults.find(c => c.cohortType === selectedCohortType);
+      return cohort?.treeImages || [];
+    }
+    return $resultsState.treeImages;
+  })();
   
   onMount(async () => {
     console.log('[PhylogeneticTrees] Mounted with', $resultsState.treeImages.length, 'trees');
   });
   
   function getNewickPath(pngPath: string): string {
-    let newickPath = pngPath.replace('.png', '.newick');
-    return newickPath;
+    return pngPath.replace('.png', '.newick');
   }
   
-  function getTreeName(path: string, index: number): string {
-    const metadata = $resultsState.treeMetadata?.[index];
-    
+  function getTreeNameFromMeta(path: string, metadata: TreeMetadata | undefined): string {
     if (metadata && metadata.clone_id !== null) {
       const cloneId = metadata.clone_id;
       const cloneSize = metadata.clone_size;
-      if (cloneSize > 0) {
-        return `Clone ${cloneId} (${cloneSize} seqs)`;
-      }
-      return `Clone ${cloneId}`;
+      return cloneSize > 0 ? `Clone ${cloneId} (${cloneSize} seqs)` : `Clone ${cloneId}`;
     }
-    
     const filename = path.split('/').pop() || '';
     const match = filename.match(/tree_(\d+)/);
     if (match) return `Clone ${match[1]}`;
     return filename.replace('.png', '').replace(/_/g, ' ');
   }
-  
+
+  function getTreeName(path: string, index: number): string {
+    return getTreeNameFromMeta(path, activeTreeMetadata[index]);
+  }
 </script>
 
 <div class="trees-container">
-  {#if $resultsState.treeImages.length === 0}
+  {#if $resultsState.treeImages.length === 0 && !hasCohorts}
     <div class="empty-state">
       <div class="empty-icon">
         <svg width="64" height="64" viewBox="0 0 64 64" fill="none">
@@ -93,10 +133,62 @@
       <aside class="trees-sidebar">
         <div class="sidebar-header">
           <h3 class="sidebar-title">Generated Trees</h3>
-          <span class="tree-count">{$resultsState.treeImages.length}</span>
+          <span class="tree-count">{hasCohorts ? $resultsState.cohortResults.reduce((s, c) => s + c.treeImages.length, 0) : $resultsState.treeImages.length}</span>
         </div>
         <div class="tree-list">
-          {#if hasTimepoints && timepointGroups.length > 0}
+          {#if hasCohorts}
+            {#each $resultsState.cohortResults as cohort (cohort.cohortType)}
+              {@const cohortTpGroups = buildCohortTimepointGroups(cohort)}
+              <button class="cohort-tree-header cohort-tree-{cohort.cohortType}" on:click={() => toggleCohortExpand(cohort.cohortType)}>
+                <svg class="tp-chevron" class:expanded={cohortExpanded[cohort.cohortType] !== false} width="12" height="12" viewBox="0 0 12 12" fill="none">
+                  <path d="M4 2l4 4-4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+                <span class="cohort-tree-dot cohort-dot-{cohort.cohortType}"></span>
+                <span class="tp-group-label">{cohort.cohortName}</span>
+                <span class="tp-group-count">{cohort.treeImages.length}</span>
+              </button>
+              {#if cohortExpanded[cohort.cohortType] !== false}
+                {#if cohortTpGroups.length > 0}
+                  {#each cohortTpGroups as group}
+                    <button class="tp-group-header tp-group-nested" on:click={() => toggleTpGroup(cohort.cohortType + ':' + group.label)}>
+                      <svg class="tp-chevron" class:expanded={tpExpanded[cohort.cohortType + ':' + group.label] !== false} width="12" height="12" viewBox="0 0 12 12" fill="none">
+                        <path d="M4 2l4 4-4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                      </svg>
+                      <span class="tp-group-label">{group.label}</span>
+                      <span class="tp-group-count">{group.trees.length}</span>
+                    </button>
+                    {#if tpExpanded[cohort.cohortType + ':' + group.label] !== false}
+                      {#each group.trees as tree}
+                        <button
+                          class="tree-item tree-item-deep"
+                          class:selected={selectedCohortType === cohort.cohortType && selectedTreeIndex === tree.index}
+                          on:click={() => selectCohortTree(cohort.cohortType, tree.index)}
+                        >
+                          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                            <path d="M8 2v4M8 6H4v4M8 6h4v4M4 10v4M12 10v4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                          </svg>
+                          <span class="tree-name">{getTreeNameFromMeta(tree.path, tree.metadata)}</span>
+                        </button>
+                      {/each}
+                    {/if}
+                  {/each}
+                {:else}
+                  {#each cohort.treeImages as treePath, index}
+                    <button
+                      class="tree-item tree-item-nested"
+                      class:selected={selectedCohortType === cohort.cohortType && selectedTreeIndex === index}
+                      on:click={() => selectCohortTree(cohort.cohortType, index)}
+                    >
+                      <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                        <path d="M8 2v4M8 6H4v4M8 6h4v4M4 10v4M12 10v4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                      </svg>
+                      <span class="tree-name">{getTreeNameFromMeta(treePath, cohort.treeMetadata[index])}</span>
+                    </button>
+                  {/each}
+                {/if}
+              {/if}
+            {/each}
+          {:else if hasTimepoints && timepointGroups.length > 0}
             {#each timepointGroups as group}
               <button class="tp-group-header" on:click={() => toggleTpGroup(group.label)}>
                 <svg class="tp-chevron" class:expanded={tpExpanded[group.label] !== false} width="12" height="12" viewBox="0 0 12 12" fill="none">
@@ -109,8 +201,8 @@
                 {#each group.trees as tree}
                   <button 
                     class="tree-item tree-item-nested"
-                    class:selected={selectedTreeIndex === tree.index}
-                    on:click={() => selectedTreeIndex = tree.index}
+                    class:selected={selectedCohortType === null && selectedTreeIndex === tree.index}
+                    on:click={() => selectDefaultTree(tree.index)}
                   >
                     <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
                       <path d="M8 2v4M8 6H4v4M8 6h4v4M4 10v4M12 10v4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
@@ -124,8 +216,8 @@
             {#each $resultsState.treeImages as treePath, index}
               <button 
                 class="tree-item"
-                class:selected={selectedTreeIndex === index}
-                on:click={() => selectedTreeIndex = index}
+                class:selected={selectedCohortType === null && selectedTreeIndex === index}
+                on:click={() => selectDefaultTree(index)}
               >
                 <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
                   <path d="M8 2v4M8 6H4v4M8 6h4v4M4 10v4M12 10v4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
@@ -148,16 +240,21 @@
           <div class="tree-view-container">
             <div class="tree-header">
               <div class="tree-header-main">
-                <h2 class="tree-title">{getTreeName($resultsState.treeImages[selectedTreeIndex], selectedTreeIndex)}</h2>
+                <h2 class="tree-title">{getTreeName(activeTreeImages[selectedTreeIndex] || '', selectedTreeIndex)}</h2>
+                {#if selectedCohortType}
+                  {@const cohort = $resultsState.cohortResults.find(c => c.cohortType === selectedCohortType)}
+                  {#if cohort}
+                    <span class="tree-cohort-tag tree-cohort-{cohort.cohortType}">{cohort.cohortName}</span>
+                  {/if}
+                {/if}
               </div>
             </div>
             
             <div class="tree-content">
-              <!-- Interactive phylogenetic tree with export functionality -->
               <InteractiveTree 
-                newickPath={getNewickPath($resultsState.treeImages[selectedTreeIndex])}
-                treeName={getTreeName($resultsState.treeImages[selectedTreeIndex], selectedTreeIndex)}
-                cloneSize={$resultsState.treeMetadata?.[selectedTreeIndex]?.clone_size || 0}
+                newickPath={getNewickPath(activeTreeImages[selectedTreeIndex] || '')}
+                treeName={getTreeName(activeTreeImages[selectedTreeIndex] || '', selectedTreeIndex)}
+                cloneSize={activeTreeMetadata[selectedTreeIndex]?.clone_size || 0}
               />
             </div>
           </div>
@@ -476,6 +573,47 @@
   .tree-item-nested {
     padding-left: var(--space-6);
   }
-  
+
+  .tree-item-deep {
+    padding-left: calc(var(--space-6) + var(--space-4));
+  }
+
+  .tp-group-nested {
+    padding-left: var(--space-5);
+  }
+
+  .cohort-tree-header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    width: 100%;
+    padding: var(--space-2) var(--space-3);
+    border: none;
+    border-radius: var(--border-radius-md);
+    font-size: var(--text-sm);
+    font-weight: var(--font-bold);
+    color: var(--text-primary);
+    text-align: left;
+    cursor: pointer;
+    margin-bottom: 2px;
+    transition: background var(--transition-fast);
+  }
+  .cohort-tree-disease { background: #E3F2FD; }
+  .cohort-tree-disease:hover { background: #BBDEFB; }
+  .cohort-tree-control { background: #F5F5F5; }
+  .cohort-tree-control:hover { background: #EEEEEE; }
+
+  .cohort-tree-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .cohort-dot-disease { background: #1565C0; }
+  .cohort-dot-control { background: #757575; }
+
+  .tree-cohort-tag {
+    font-size: var(--text-xs);
+    font-weight: var(--font-medium);
+    padding: 1px 8px;
+    border-radius: var(--border-radius-full);
+  }
+  .tree-cohort-disease { background: #E3F2FD; color: #1565C0; }
+  .tree-cohort-control { background: #F5F5F5; color: #616161; }
 </style>
 

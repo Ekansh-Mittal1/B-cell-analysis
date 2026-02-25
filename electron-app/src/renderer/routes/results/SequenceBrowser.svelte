@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { resultsState, filteredFileGroups, sequenceSearchQuery, toggleFileGroup, toggleCloneGroup, selectSequence, type FileGroup, type TimepointMapping } from '../../lib/stores/app';
+  import { resultsState, filteredFileGroups, sequenceSearchQuery, toggleFileGroup, toggleCloneGroup, selectSequence, type FileGroup, type TimepointMapping, type CohortResults } from '../../lib/stores/app';
   
   // Function to clean the sequence name for display (remove file ID suffix)
   function cleanSequenceName(name: string): string {
@@ -125,6 +125,26 @@
   }
 
   // Removed isTpExpanded function - use timepointExpanded[label] directly in template for reactivity
+
+  // ── Cohort grouping ──
+  $: hasCohorts = $resultsState.cohortResults.length > 0;
+  let cohortExpanded: Record<string, boolean> = {};
+  function toggleCohort(type: string) {
+    const current = cohortExpanded[type] !== false;
+    cohortExpanded = { ...cohortExpanded, [type]: !current };
+  }
+  $: if (hasCohorts) {
+    let needsInit = false;
+    const newState = { ...cohortExpanded };
+    for (const cr of $resultsState.cohortResults) {
+      if (newState[cr.cohortType] === undefined) { newState[cr.cohortType] = true; needsInit = true; }
+    }
+    if (needsInit) cohortExpanded = newState;
+  }
+
+  function buildCohortTimepointGroups(cohort: CohortResults): TimepointGroup[] {
+    return buildTimepointGroups(cohort.fileGroups, cohort.timepointMapping);
+  }
 </script>
 
 <div class="sequence-browser">
@@ -154,9 +174,87 @@
     </div>
   </div>
   
-  <!-- Groups list: Timepoint > File > Clone > Sequence if mapping present, else File > Clone > Sequence -->
+  <!-- Groups list: [Cohort >] Timepoint > File > Clone > Sequence -->
   <div class="groups-list">
-    {#if hasTimepointMapping}
+    {#if hasCohorts}
+      {#each $resultsState.cohortResults as cohort (cohort.cohortType)}
+        {@const cohortTpGroups = buildCohortTimepointGroups(cohort)}
+        <div class="cohort-group">
+          <button class="group-header cohort-header cohort-{cohort.cohortType}" on:click={() => toggleCohort(cohort.cohortType)}>
+            <svg class="expand-icon" class:expanded={cohortExpanded[cohort.cohortType] !== false} width="14" height="14" viewBox="0 0 14 14" fill="none">
+              <path d="M5 4l4 3-4 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            <span class="cohort-dot cohort-dot-{cohort.cohortType}"></span>
+            <span class="group-name">{cohort.cohortName}</span>
+            <span class="cohort-type-tag cohort-tag-{cohort.cohortType}">{cohort.cohortType}</span>
+            <span class="group-count">{cohort.sequences.length}</span>
+          </button>
+          {#if cohortExpanded[cohort.cohortType] !== false}
+            <div class="cohort-children">
+              {#each cohortTpGroups as tpGroup (tpGroup.label)}
+                <div class="timepoint-group">
+                  <button class="group-header tp-header" on:click={() => toggleTimepoint(cohort.cohortType + ':' + tpGroup.label)}>
+                    <svg class="expand-icon" class:expanded={timepointExpanded[cohort.cohortType + ':' + tpGroup.label] !== false} width="14" height="14" viewBox="0 0 14 14" fill="none">
+                      <path d="M5 4l4 3-4 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                    <svg class="tp-icon" width="14" height="14" viewBox="0 0 14 14" fill="none">
+                      <circle cx="7" cy="7" r="5.5" stroke="currentColor" stroke-width="1.2"/>
+                      <path d="M7 4v3l2 1.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+                    </svg>
+                    <span class="group-name">{tpGroup.label}</span>
+                    <span class="group-count">{tpGroup.totalSeqs}</span>
+                  </button>
+                  {#if timepointExpanded[cohort.cohortType + ':' + tpGroup.label] !== false}
+                    <div class="tp-children">
+                      {#each tpGroup.fileGroups as group}
+                        <div class="file-group">
+                          <button class="group-header file-header" on:click={() => toggleFileGroup(group.filename)}>
+                            <svg class="expand-icon" class:expanded={group.expanded} width="14" height="14" viewBox="0 0 14 14" fill="none">
+                              <path d="M5 4l4 3-4 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                            </svg>
+                            <span class="group-name">{group.filename}</span>
+                            <span class="group-count">{group.sequences.length}</span>
+                          </button>
+                          {#if group.expanded}
+                            <div class="clones-container">
+                              {#each group.cloneGroups as cloneGroup}
+                                <div class="clone-group">
+                                  <button class="group-header clone-header" on:click={() => toggleCloneGroup(group.filename, cloneGroup.cloneId)}>
+                                    <svg class="expand-icon" class:expanded={cloneGroup.expanded} width="14" height="14" viewBox="0 0 14 14" fill="none">
+                                      <path d="M5 4l4 3-4 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                                    </svg>
+                                    {#if cloneGroup.cloneId === -1}<span class="group-name">Singletons</span>
+                                    {:else if cloneGroup.cloneId === null}<span class="group-name">No Clone</span>
+                                    {:else}<span class="group-name">Clone {cloneGroup.cloneId}</span>{/if}
+                                    <span class="group-count">{cloneGroup.size}</span>
+                                  </button>
+                                  {#if cloneGroup.expanded}
+                                    <div class="sequence-list nested">
+                                      {#each cloneGroup.sequences as seq}
+                                        <button class="sequence-item" class:selected={$resultsState.selectedSequenceId === seq.id} on:click={() => selectSequence(seq.id)}>
+                                          <div class="seq-main">
+                                            <span class="seq-name">{cleanSequenceName(seq.name)}</span>
+                                            <div class="badges">{#if seq.productive === false}<span class="nonproductive-badge">Non-productive</span>{/if}</div>
+                                          </div>
+                                        </button>
+                                      {/each}
+                                    </div>
+                                  {/if}
+                                </div>
+                              {/each}
+                            </div>
+                          {/if}
+                        </div>
+                      {/each}
+                    </div>
+                  {/if}
+                </div>
+              {/each}
+            </div>
+          {/if}
+        </div>
+      {/each}
+    {:else if hasTimepointMapping}
       {#each timepointGroups as tpGroup (tpGroup.label)}
         <div class="timepoint-group">
           <button
@@ -595,6 +693,31 @@
   }
 
   
+  /* ── Cohort grouping ── */
+  .cohort-group { margin-bottom: var(--space-3); }
+  .cohort-header { font-weight: var(--font-semibold); }
+  .cohort-header.cohort-disease { background: #E3F2FD; }
+  .cohort-header.cohort-disease:hover { background: #BBDEFB; }
+  .cohort-header.cohort-control { background: #F5F5F5; }
+  .cohort-header.cohort-control:hover { background: #EEEEEE; }
+
+  .cohort-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .cohort-dot-disease { background: #1565C0; }
+  .cohort-dot-control { background: #757575; }
+
+  .cohort-type-tag {
+    font-size: 9px;
+    font-weight: var(--font-semibold);
+    padding: 1px 6px;
+    border-radius: var(--border-radius-full);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .cohort-tag-disease { background: #BBDEFB; color: #1565C0; }
+  .cohort-tag-control { background: #E0E0E0; color: #616161; }
+
+  .cohort-children { padding-left: var(--space-3); }
+
   .empty-state {
     padding: var(--space-8);
     text-align: center;

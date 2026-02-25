@@ -6,10 +6,12 @@
   
   /** Multi-timepoint mode: array of {label, calculated} */
   export let timepointThresholds: { label: string; calculated: number }[] = [];
+
+  /** Optional cohort label shown in the dialog title when running multi-cohort */
+  export let cohortLabel: string = '';
   
   const dispatch = createEventDispatcher<{
     confirm: number | Record<string, number>;
-    cancel: void;
   }>();
   
   // Determine mode
@@ -70,21 +72,8 @@
     }
   }
   
-  function handleUseCalculated() {
-    if (isMulti) {
-      const thresholds: Record<string, number> = {};
-      for (const tp of timepointThresholds) {
-        thresholds[tp.label] = tp.calculated;
-      }
-      dispatch('confirm', thresholds);
-    } else {
-      dispatch('confirm', calculatedValue);
-    }
-  }
-  
   function handleKeydown(e: KeyboardEvent) {
     if (e.key === 'Enter') handleSubmit();
-    else if (e.key === 'Escape') handleUseCalculated();
   }
 </script>
 
@@ -92,12 +81,15 @@
   <div class="modal" role="dialog" aria-modal="true">
     <div class="modal-header">
       <h2 class="modal-title">Distance Threshold</h2>
+      {#if cohortLabel}
+        <span class="cohort-badge">{cohortLabel}</span>
+      {/if}
     </div>
     
     <div class="modal-body">
       {#if isMulti}
         <p class="calculated-info">
-          Calculated thresholds per timepoint for clone definition:
+          Calculated thresholds per timepoint{cohortLabel ? ` for ${cohortLabel}` : ''} for clone definition:
         </p>
         
         <div class="tp-table">
@@ -138,7 +130,7 @@
         </label>
       {:else}
         <p class="calculated-info">
-          The calculated optimal threshold for clone definition is:
+          The calculated optimal threshold{cohortLabel ? ` for ${cohortLabel}` : ''} for clone definition is:
         </p>
         <div class="calculated-value">
           {calculatedValue.toFixed(4)}
@@ -164,9 +156,6 @@
     </div>
     
     <div class="modal-actions">
-      <button class="btn btn-secondary" on:click={handleUseCalculated}>
-        Use Calculated
-      </button>
       <button class="btn btn-primary" on:click={handleSubmit}>
         Apply
       </button>
@@ -198,6 +187,9 @@
   
   .modal-header {
     margin-bottom: var(--space-4);
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
   }
   
   .modal-title {
@@ -205,6 +197,18 @@
     font-weight: var(--font-semibold);
     color: var(--text-primary);
     margin: 0;
+  }
+
+  .cohort-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: var(--space-1) var(--space-3);
+    background: var(--color-primary-light);
+    color: var(--color-primary);
+    border-radius: var(--border-radius-full);
+    font-size: var(--text-xs);
+    font-weight: var(--font-semibold);
+    white-space: nowrap;
   }
   
   .modal-body {

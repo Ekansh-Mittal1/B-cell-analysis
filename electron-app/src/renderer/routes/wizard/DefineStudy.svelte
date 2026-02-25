@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { wizardState, canProceedStep1, type WizardTimepoint } from '../../lib/stores/app';
+  import { wizardState, canProceedStep1, type WizardTimepoint, type WizardCohort } from '../../lib/stores/app';
 
   let isLoading = false;
 
@@ -7,44 +7,59 @@
     return Math.random().toString(36).slice(2, 8);
   }
 
-  async function handleSelectFolder() {
+  // ── Control cohort management ──
+
+  function initCohorts() {
+    wizardState.update(s => {
+      if (s.cohorts.length >= 2) return s;
+      const disease: WizardCohort = {
+        id: genId(), name: 'Disease', type: 'disease',
+        timepoints: s.timepoints.length > 0 ? [...s.timepoints] : []
+      };
+      const control: WizardCohort = {
+        id: genId(), name: 'Control', type: 'control', timepoints: []
+      };
+      return { ...s, hasControlCohort: true, cohorts: [disease, control] };
+    });
+  }
+
+  function removeControlCohort() {
+    wizardState.update(s => {
+      const diseaseTps = s.cohorts.find(c => c.type === 'disease')?.timepoints ?? s.timepoints;
+      return { ...s, hasControlCohort: false, cohorts: [], timepoints: diseaseTps };
+    });
+  }
+
+  function toggleControlCohort() {
+    if ($wizardState.hasControlCohort) removeControlCohort();
+    else initCohorts();
+  }
+
+  $: if ($wizardState.hasControlCohort && $wizardState.cohorts.length >= 1) {
+    const diseaseTps = $wizardState.cohorts.find(c => c.type === 'disease')?.timepoints ?? [];
+    if (diseaseTps !== $wizardState.timepoints) {
+      wizardState.update(s => ({ ...s, timepoints: diseaseTps }));
+    }
+  }
+
+  // ── Folder selection (per timepoint) ──
+
+  async function handleSelectTimepointFolder(tpIndex: number) {
     if (!window.electronAPI) return;
     isLoading = true;
     try {
       const result = await window.electronAPI.selectDirectory();
       if (!result) return;
 
-      if (result.detectedTimepoints && result.detectedTimepoints.length > 0) {
-        // Subdirectories detected as timepoints
-        const timepoints: WizardTimepoint[] = result.detectedTimepoints.map(tp => ({
-          id: genId(),
-          label: tp.label,
-          fastaDir: tp.dir,
-          fastaFiles: tp.files.map(f => tp.dir + '/' + f)
-        }));
+      const files = result.files.length > 0
+        ? result.files.map((f: string) => result.path + '/' + f)
+        : (result.detectedTimepoints || []).flatMap((tp: any) => tp.files.map((f: string) => tp.dir + '/' + f));
 
-        // Auto-fill study name from parent folder name if empty
-        const folderName = result.path.split('/').pop() || '';
-        wizardState.update(s => ({
-          ...s,
-          studyName: s.studyName || folderName,
-          timepoints
-        }));
-      } else if (result.files.length > 0) {
-        // Flat folder — treat as a single timepoint
-        const folderName = result.path.split('/').pop() || '';
-        const tp: WizardTimepoint = {
-          id: genId(),
-          label: 'Baseline',
-          fastaDir: result.path,
-          fastaFiles: result.files.map(f => result.path + '/' + f)
-        };
-        wizardState.update(s => ({
-          ...s,
-          studyName: s.studyName || folderName,
-          timepoints: [tp]
-        }));
-      }
+      wizardState.update(s => {
+        const tps = [...s.timepoints];
+        tps[tpIndex] = { ...tps[tpIndex], fastaDir: result.path, fastaFiles: files };
+        return { ...s, timepoints: tps };
+      });
     } catch (error) {
       console.error('Error selecting directory:', error);
     } finally {
@@ -52,64 +67,44 @@
     }
   }
 
-  async function handleAddTimepointFolder(tpIndex: number) {
+  async function handleSelectTimepointFolderForCohort(cohortType: 'disease' | 'control', tpIndex: number) {
     if (!window.electronAPI) return;
     isLoading = true;
     try {
       const result = await window.electronAPI.selectDirectory();
       if (!result) return;
 
-      const allFiles = result.files.length > 0
-        ? result.files.map(f => result.path + '/' + f)
-        : [];
+      const files = result.files.length > 0
+        ? result.files.map((f: string) => result.path + '/' + f)
+        : (result.detectedTimepoints || []).flatMap((tp: any) => tp.files.map((f: string) => tp.dir + '/' + f));
 
-      // If it's a folder with timepoint subfolders, flatten them
-      if (result.detectedTimepoints && result.detectedTimepoints.length > 0) {
-        const flatFiles = result.detectedTimepoints.flatMap(tp =>
-          tp.files.map(f => tp.dir + '/' + f)
-        );
-        wizardState.update(s => {
-          const tps = [...s.timepoints];
-          tps[tpIndex] = {
-            ...tps[tpIndex],
-            fastaDir: result.path,
-            fastaFiles: flatFiles
-          };
-          return { ...s, timepoints: tps };
+      wizardState.update(s => {
+        const cohorts = s.cohorts.map(c => {
+          if (c.type !== cohortType) return c;
+          const tps = [...c.timepoints];
+          tps[tpIndex] = { ...tps[tpIndex], fastaDir: result.path, fastaFiles: files };
+          return { ...c, timepoints: tps };
         });
-      } else {
-        wizardState.update(s => {
-          const tps = [...s.timepoints];
-          tps[tpIndex] = {
-            ...tps[tpIndex],
-            fastaDir: result.path,
-            fastaFiles: allFiles
-          };
-          return { ...s, timepoints: tps };
-        });
-      }
+        return { ...s, cohorts };
+      });
     } catch (error) {
-      console.error('Error selecting timepoint directory:', error);
+      console.error('Error selecting directory:', error);
     } finally {
       isLoading = false;
     }
   }
 
+  // ── Timepoint CRUD (single cohort) ──
+
   function addEmptyTimepoint() {
     wizardState.update(s => ({
       ...s,
-      timepoints: [
-        ...s.timepoints,
-        { id: genId(), label: `T${s.timepoints.length + 1}`, fastaDir: null, fastaFiles: [] }
-      ]
+      timepoints: [...s.timepoints, { id: genId(), label: `T${s.timepoints.length + 1}`, fastaDir: null, fastaFiles: [] }]
     }));
   }
 
   function removeTimepoint(index: number) {
-    wizardState.update(s => ({
-      ...s,
-      timepoints: s.timepoints.filter((_, i) => i !== index)
-    }));
+    wizardState.update(s => ({ ...s, timepoints: s.timepoints.filter((_, i) => i !== index) }));
   }
 
   function updateTimepointLabel(index: number, label: string) {
@@ -119,6 +114,49 @@
       return { ...s, timepoints: tps };
     });
   }
+
+  // ── Timepoint CRUD (cohort-aware) ──
+
+  function addEmptyTimepointForCohort(cohortType: 'disease' | 'control') {
+    wizardState.update(s => {
+      const cohorts = s.cohorts.map(c => {
+        if (c.type !== cohortType) return c;
+        return { ...c, timepoints: [...c.timepoints, { id: genId(), label: `T${c.timepoints.length + 1}`, fastaDir: null, fastaFiles: [] }] };
+      });
+      return { ...s, cohorts };
+    });
+  }
+
+  function removeTimepointForCohort(cohortType: 'disease' | 'control', index: number) {
+    wizardState.update(s => {
+      const cohorts = s.cohorts.map(c => {
+        if (c.type !== cohortType) return c;
+        return { ...c, timepoints: c.timepoints.filter((_, i) => i !== index) };
+      });
+      return { ...s, cohorts };
+    });
+  }
+
+  function updateTimepointLabelForCohort(cohortType: 'disease' | 'control', index: number, label: string) {
+    wizardState.update(s => {
+      const cohorts = s.cohorts.map(c => {
+        if (c.type !== cohortType) return c;
+        const tps = [...c.timepoints];
+        tps[index] = { ...tps[index], label };
+        return { ...c, timepoints: tps };
+      });
+      return { ...s, cohorts };
+    });
+  }
+
+  function updateCohortName(cohortType: 'disease' | 'control', name: string) {
+    wizardState.update(s => ({
+      ...s,
+      cohorts: s.cohorts.map(c => c.type === cohortType ? { ...c, name } : c)
+    }));
+  }
+
+  // ── Other ──
 
   function handleStudyNameChange(e: Event) {
     const val = (e.target as HTMLInputElement).value;
@@ -137,6 +175,9 @@
   function totalFileCount(tps: WizardTimepoint[]): number {
     return tps.reduce((sum, tp) => sum + tp.fastaFiles.length, 0);
   }
+
+  $: diseaseCohort = $wizardState.cohorts.find(c => c.type === 'disease');
+  $: controlCohort = $wizardState.cohorts.find(c => c.type === 'control');
 </script>
 
 <div class="step-container">
@@ -144,8 +185,7 @@
     <span class="step-number">Step 1</span>
     <h1 class="step-title">Define Study</h1>
     <p class="step-description">
-      Name your study and define timepoints. Select a folder with subfolders (auto-detected as timepoints)
-      or add timepoints manually.
+      Name your study, add timepoints, and select FASTA files for each timepoint.
     </p>
   </header>
 
@@ -163,119 +203,158 @@
       />
     </div>
 
-    <!-- Auto-detect from folder -->
-    <div class="picker-card">
-      <div class="picker-icon">
-        <svg width="40" height="40" viewBox="0 0 48 48" fill="none">
-          <rect x="4" y="10" width="40" height="32" rx="3" stroke="currentColor" stroke-width="2"/>
-          <path d="M4 18h40" stroke="currentColor" stroke-width="2"/>
-          <path d="M4 13a3 3 0 0 1 3-3h12l3 4h22a3 3 0 0 1 3 3" stroke="currentColor" stroke-width="2"/>
-        </svg>
-      </div>
-
-      {#if $wizardState.timepoints.length > 0}
-        <div class="selected-info">
-          <div class="file-count-badge">
-            <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-              <path d="M11.5 4L5.5 10L2.5 7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-            </svg>
-            {$wizardState.timepoints.length} timepoint{$wizardState.timepoints.length !== 1 ? 's' : ''} &middot; {totalFileCount($wizardState.timepoints)} files
-          </div>
+    <!-- Control cohort toggle (always visible, prominent) -->
+    <div class="control-toggle-section">
+      <label class="checkbox-option">
+        <input type="checkbox" checked={$wizardState.hasControlCohort} on:change={toggleControlCohort} />
+        <div class="checkbox-content">
+          <span class="checkbox-label">Add Control Cohort</span>
+          <span class="checkbox-description">
+            Compare with a control group. Both groups are analyzed independently and compared side-by-side.
+          </span>
         </div>
-        <button class="btn btn-secondary" on:click={handleSelectFolder} disabled={isLoading}>
-          Re-detect from Folder
-        </button>
-      {:else}
-        <button class="btn btn-primary btn-lg" on:click={handleSelectFolder} disabled={isLoading}>
-          {#if isLoading}
-            Scanning...
-          {:else}
-            <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-              <rect x="2" y="5" width="16" height="12" rx="2" stroke="currentColor" stroke-width="1.5"/>
-              <path d="M2 8h16" stroke="currentColor" stroke-width="1.5"/>
-              <path d="M2 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2" stroke="currentColor" stroke-width="1.5"/>
-            </svg>
-            Select Study Folder
-          {/if}
-        </button>
-        <p class="picker-hint">Subfolders will be auto-detected as timepoints</p>
-      {/if}
+      </label>
     </div>
 
-    <!-- Timepoint list -->
-    {#if $wizardState.timepoints.length > 0}
+    {#if !$wizardState.hasControlCohort}
+      <!-- ═══ SINGLE COHORT MODE ═══ -->
       <div class="timepoints-section">
         <div class="section-header">
           <h3 class="section-title">Timepoints</h3>
-          <button class="btn btn-secondary btn-sm" on:click={addEmptyTimepoint}>
-            + Add Timepoint
-          </button>
+          <button class="btn btn-secondary btn-sm" on:click={addEmptyTimepoint}>+ Add Timepoint</button>
         </div>
 
-        <div class="timepoints-list">
-          {#each $wizardState.timepoints as tp, i (tp.id)}
-            <div class="tp-card">
-              <div class="tp-header">
-                <input
-                  type="text"
-                  class="tp-label-input"
-                  value={tp.label}
-                  on:input={(e) => updateTimepointLabel(i, e.currentTarget.value)}
-                  placeholder="Timepoint name"
-                />
-                <div class="tp-actions">
-                  {#if tp.fastaFiles.length > 0}
-                    <span class="tp-badge">{tp.fastaFiles.length} file{tp.fastaFiles.length !== 1 ? 's' : ''}</span>
-                  {/if}
-                  <button class="btn btn-ghost btn-sm" on:click={() => handleAddTimepointFolder(i)} disabled={isLoading}>
-                    {tp.fastaDir ? 'Change' : 'Select'} Folder
-                  </button>
-                  {#if $wizardState.timepoints.length > 1}
+        {#if $wizardState.timepoints.length > 0}
+          <div class="timepoints-list">
+            {#each $wizardState.timepoints as tp, i (tp.id)}
+              <div class="tp-card">
+                <div class="tp-header">
+                  <input type="text" class="tp-label-input" value={tp.label}
+                    on:input={(e) => updateTimepointLabel(i, e.currentTarget.value)} placeholder="Timepoint name" />
+                  <div class="tp-actions">
+                    {#if tp.fastaFiles.length > 0}
+                      <span class="tp-badge">{tp.fastaFiles.length} file{tp.fastaFiles.length !== 1 ? 's' : ''}</span>
+                    {/if}
+                    <button class="btn btn-ghost btn-sm" on:click={() => handleSelectTimepointFolder(i)} disabled={isLoading}>
+                      {tp.fastaDir ? 'Change' : 'Select'} Folder
+                    </button>
                     <button class="btn btn-ghost btn-sm btn-danger" on:click={() => removeTimepoint(i)} title="Remove timepoint">
                       <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
                         <path d="M3 3l8 8M11 3l-8 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
                       </svg>
                     </button>
-                  {/if}
+                  </div>
                 </div>
+                {#if tp.fastaDir}<div class="tp-dir">{tp.fastaDir.split('/').pop()}</div>{/if}
+                {#if tp.fastaFiles.length > 0}
+                  <div class="tp-files">
+                    {#each tp.fastaFiles.slice(0, 5) as file}
+                      <span class="tp-file">{file.split('/').pop()}</span>
+                    {/each}
+                    {#if tp.fastaFiles.length > 5}
+                      <span class="tp-file more">+{tp.fastaFiles.length - 5} more</span>
+                    {/if}
+                  </div>
+                {:else}
+                  <div class="tp-empty">No files selected — click "Select Folder"</div>
+                {/if}
               </div>
-              {#if tp.fastaDir}
-                <div class="tp-dir">{tp.fastaDir.split('/').pop()}</div>
-              {/if}
-              {#if tp.fastaFiles.length > 0}
-                <div class="tp-files">
-                  {#each tp.fastaFiles.slice(0, 3) as file}
-                    <span class="tp-file">{file.split('/').pop()}</span>
+            {/each}
+          </div>
+        {:else}
+          <div class="empty-hint">
+            <p>Add timepoints and select FASTA files for each one.</p>
+            <button class="btn btn-primary" on:click={addEmptyTimepoint}>+ Add First Timepoint</button>
+          </div>
+        {/if}
+
+        {#if $wizardState.timepoints.length > 0}
+          <div class="timepoints-summary">
+            {$wizardState.timepoints.length} timepoint{$wizardState.timepoints.length !== 1 ? 's' : ''} &middot; {totalFileCount($wizardState.timepoints)} files total
+          </div>
+        {/if}
+      </div>
+
+    {:else}
+      <!-- ═══ TWO-COHORT MODE ═══ -->
+      {#each ['disease', 'control'] as ctype (ctype)}
+        {@const cohort = ctype === 'disease' ? diseaseCohort : controlCohort}
+        {@const ct = ctype === 'disease' ? 'disease' : 'control'}
+        {#if cohort}
+          <div class="cohort-section cohort-{ctype}">
+            <div class="cohort-header">
+              <div class="cohort-indicator cohort-indicator-{ctype}"></div>
+              <input type="text" class="cohort-name-input" value={cohort.name}
+                on:input={(e) => updateCohortName(ct, e.currentTarget.value)}
+                placeholder="{ctype === 'disease' ? 'Disease Group' : 'Control Group'}" />
+              <span class="cohort-type-badge cohort-type-{ctype}">{ctype}</span>
+            </div>
+
+            <div class="timepoints-section">
+              <div class="section-header">
+                <h3 class="section-title">Timepoints</h3>
+                <button class="btn btn-secondary btn-sm" on:click={() => addEmptyTimepointForCohort(ct)}>+ Add Timepoint</button>
+              </div>
+
+              {#if cohort.timepoints.length > 0}
+                <div class="timepoints-list">
+                  {#each cohort.timepoints as tp, i (tp.id)}
+                    <div class="tp-card">
+                      <div class="tp-header">
+                        <input type="text" class="tp-label-input" value={tp.label}
+                          on:input={(e) => updateTimepointLabelForCohort(ct, i, e.currentTarget.value)} placeholder="Timepoint name" />
+                        <div class="tp-actions">
+                          {#if tp.fastaFiles.length > 0}
+                            <span class="tp-badge">{tp.fastaFiles.length} file{tp.fastaFiles.length !== 1 ? 's' : ''}</span>
+                          {/if}
+                          <button class="btn btn-ghost btn-sm" on:click={() => handleSelectTimepointFolderForCohort(ct, i)} disabled={isLoading}>
+                            {tp.fastaDir ? 'Change' : 'Select'} Folder
+                          </button>
+                          <button class="btn btn-ghost btn-sm btn-danger" on:click={() => removeTimepointForCohort(ct, i)} title="Remove timepoint">
+                            <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                              <path d="M3 3l8 8M11 3l-8 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                            </svg>
+                          </button>
+                        </div>
+                      </div>
+                      {#if tp.fastaDir}<div class="tp-dir">{tp.fastaDir.split('/').pop()}</div>{/if}
+                      {#if tp.fastaFiles.length > 0}
+                        <div class="tp-files">
+                          {#each tp.fastaFiles.slice(0, 5) as file}
+                            <span class="tp-file">{file.split('/').pop()}</span>
+                          {/each}
+                          {#if tp.fastaFiles.length > 5}
+                            <span class="tp-file more">+{tp.fastaFiles.length - 5} more</span>
+                          {/if}
+                        </div>
+                      {:else}
+                        <div class="tp-empty">No files selected — click "Select Folder"</div>
+                      {/if}
+                    </div>
                   {/each}
-                  {#if tp.fastaFiles.length > 3}
-                    <span class="tp-file more">+{tp.fastaFiles.length - 3} more</span>
-                  {/if}
                 </div>
               {:else}
-                <div class="tp-empty">No files selected — click "Select Folder" above</div>
+                <div class="empty-hint">
+                  <button class="btn btn-secondary btn-sm" on:click={() => addEmptyTimepointForCohort(ct)}>+ Add First Timepoint</button>
+                </div>
+              {/if}
+
+              {#if cohort.timepoints.length > 0}
+                <div class="timepoints-summary">
+                  {cohort.timepoints.length} timepoint{cohort.timepoints.length !== 1 ? 's' : ''} &middot; {totalFileCount(cohort.timepoints)} files
+                </div>
               {/if}
             </div>
-          {/each}
-        </div>
-      </div>
-    {:else}
-      <div class="empty-hint">
-        <p>Or add timepoints manually:</p>
-        <button class="btn btn-secondary" on:click={addEmptyTimepoint}>
-          + Add Timepoint
-        </button>
-      </div>
+          </div>
+        {/if}
+      {/each}
     {/if}
 
     <!-- Options -->
     <div class="options-section">
       <h3 class="options-title">Processing Options</h3>
       <label class="checkbox-option">
-        <input
-          type="checkbox"
-          checked={$wizardState.cleanFasta}
-          on:change={handleCleanFastaChange}
-        />
+        <input type="checkbox" checked={$wizardState.cleanFasta} on:change={handleCleanFastaChange} />
         <div class="checkbox-content">
           <span class="checkbox-label">Clean FASTA files</span>
           <span class="checkbox-description">
@@ -289,11 +368,7 @@
 
   <footer class="step-footer">
     <div class="footer-spacer"></div>
-    <button
-      class="btn btn-primary btn-lg"
-      disabled={!$canProceedStep1}
-      on:click={handleNext}
-    >
+    <button class="btn btn-primary btn-lg" disabled={!$canProceedStep1} on:click={handleNext}>
       Continue
       <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
         <path d="M6 4l4 4-4 4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
@@ -309,9 +384,7 @@
     min-height: 100%;
   }
 
-  .step-header {
-    margin-bottom: var(--space-8);
-  }
+  .step-header { margin-bottom: var(--space-8); }
 
   .step-number {
     display: inline-block;
@@ -344,12 +417,7 @@
     gap: var(--space-6);
   }
 
-  /* Study name field */
-  .field-group {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-2);
-  }
+  .field-group { display: flex; flex-direction: column; gap: var(--space-2); }
 
   .field-label {
     font-size: var(--text-sm);
@@ -366,73 +434,12 @@
     background: var(--surface-raised);
     transition: border-color var(--transition-fast);
   }
+  .text-input:focus { outline: none; border-color: var(--color-primary); box-shadow: 0 0 0 3px var(--color-primary-muted); }
+  .text-input::placeholder { color: var(--text-tertiary); }
 
-  .text-input:focus {
-    outline: none;
-    border-color: var(--color-primary);
-    box-shadow: 0 0 0 3px var(--color-primary-muted);
-  }
-
-  .text-input::placeholder {
-    color: var(--text-tertiary);
-  }
-
-  /* Folder picker card */
-  .picker-card {
-    background: var(--surface-raised);
-    border: 2px dashed var(--border-default);
-    border-radius: var(--border-radius-lg);
-    padding: var(--space-6);
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    text-align: center;
-    transition: border-color var(--transition-fast);
-  }
-
-  .picker-card:hover {
-    border-color: var(--color-primary-muted);
-  }
-
-  .picker-icon {
-    color: var(--gray-400);
-    margin-bottom: var(--space-3);
-  }
-
-  .selected-info {
-    margin-bottom: var(--space-3);
-  }
-
-  .file-count-badge {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--space-2);
-    padding: var(--space-2) var(--space-3);
-    background: var(--color-success-light);
-    color: var(--color-success);
-    border-radius: var(--border-radius-full);
-    font-size: var(--text-sm);
-    font-weight: var(--font-medium);
-  }
-
-  .picker-hint {
-    font-size: var(--text-sm);
-    color: var(--text-tertiary);
-    margin: var(--space-3) 0 0 0;
-  }
-
-  /* Timepoints section */
-  .timepoints-section {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
-  }
-
-  .section-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-  }
+  /* ── Timepoints ── */
+  .timepoints-section { display: flex; flex-direction: column; gap: var(--space-3); }
+  .section-header { display: flex; justify-content: space-between; align-items: center; }
 
   .section-title {
     font-size: var(--text-sm);
@@ -443,11 +450,7 @@
     margin: 0;
   }
 
-  .timepoints-list {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
-  }
+  .timepoints-list { display: flex; flex-direction: column; gap: var(--space-3); }
 
   .tp-card {
     background: var(--surface-raised);
@@ -456,11 +459,7 @@
     padding: var(--space-4);
   }
 
-  .tp-header {
-    display: flex;
-    align-items: center;
-    gap: var(--space-3);
-  }
+  .tp-header { display: flex; align-items: center; gap: var(--space-3); }
 
   .tp-label-input {
     flex: 1;
@@ -473,48 +472,17 @@
     background: transparent;
     min-width: 0;
   }
+  .tp-label-input:focus { outline: none; border-color: var(--color-primary); }
 
-  .tp-label-input:focus {
-    outline: none;
-    border-color: var(--color-primary);
-  }
+  .tp-actions { display: flex; align-items: center; gap: var(--space-2); flex-shrink: 0; }
 
-  .tp-actions {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    flex-shrink: 0;
-  }
+  .tp-badge { font-size: var(--text-xs); color: var(--color-success); font-weight: var(--font-medium); white-space: nowrap; }
+  .btn-danger { color: var(--color-error) !important; }
+  .btn-danger:hover { background: rgba(239, 68, 68, 0.08) !important; }
 
-  .tp-badge {
-    font-size: var(--text-xs);
-    color: var(--color-success);
-    font-weight: var(--font-medium);
-    white-space: nowrap;
-  }
+  .tp-dir { font-size: var(--text-xs); color: var(--text-tertiary); margin-top: var(--space-2); padding-left: var(--space-3); }
 
-  .btn-danger {
-    color: var(--color-error) !important;
-  }
-
-  .btn-danger:hover {
-    background: rgba(239, 68, 68, 0.08) !important;
-  }
-
-  .tp-dir {
-    font-size: var(--text-xs);
-    color: var(--text-tertiary);
-    margin-top: var(--space-2);
-    padding-left: var(--space-3);
-  }
-
-  .tp-files {
-    display: flex;
-    flex-wrap: wrap;
-    gap: var(--space-1);
-    margin-top: var(--space-2);
-    padding-left: var(--space-3);
-  }
+  .tp-files { display: flex; flex-wrap: wrap; gap: var(--space-1); margin-top: var(--space-2); padding-left: var(--space-3); }
 
   .tp-file {
     font-size: var(--text-xs);
@@ -523,12 +491,7 @@
     padding: 2px var(--space-2);
     border-radius: var(--radius-sm);
   }
-
-  .tp-file.more {
-    color: var(--text-tertiary);
-    font-style: italic;
-    background: none;
-  }
+  .tp-file.more { color: var(--text-tertiary); font-style: italic; background: none; }
 
   .tp-empty {
     font-size: var(--text-xs);
@@ -538,42 +501,81 @@
     font-style: italic;
   }
 
-  .empty-hint {
-    text-align: center;
+  .timepoints-summary {
+    font-size: var(--text-xs);
     color: var(--text-tertiary);
-    font-size: var(--text-sm);
-    padding: var(--space-4) 0;
+    text-align: right;
+    padding-top: var(--space-1);
   }
 
-  .empty-hint p {
-    margin: 0 0 var(--space-3) 0;
+  .empty-hint { text-align: center; color: var(--text-tertiary); font-size: var(--text-sm); padding: var(--space-6) 0; }
+  .empty-hint p { margin: 0 0 var(--space-3) 0; }
+
+  /* ── Cohort sections ── */
+  .cohort-section {
+    border: 1px solid var(--border-light);
+    border-radius: var(--border-radius-lg);
+    padding: var(--space-5);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+    background: var(--surface-raised);
+  }
+  .cohort-section.cohort-disease { border-left: 3px solid #0066CC; }
+  .cohort-section.cohort-control { border-left: 3px solid #7F8C8D; }
+
+  .cohort-header { display: flex; align-items: center; gap: var(--space-3); }
+
+  .cohort-indicator { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+  .cohort-indicator-disease { background: #0066CC; }
+  .cohort-indicator-control { background: #7F8C8D; }
+
+  .cohort-name-input {
+    flex: 1;
+    padding: var(--space-2) var(--space-3);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-sm);
+    font-size: var(--text-base);
+    font-weight: var(--font-semibold);
+    color: var(--text-primary);
+    background: transparent;
+    min-width: 0;
+  }
+  .cohort-name-input:focus { outline: none; border-color: var(--color-primary); }
+
+  .cohort-type-badge {
+    font-size: var(--text-xs);
+    font-weight: var(--font-semibold);
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--border-radius-full);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    flex-shrink: 0;
+  }
+  .cohort-type-disease { background: #E3F2FD; color: #1565C0; }
+  .cohort-type-control { background: #F5F5F5; color: #616161; }
+
+  /* ── Control toggle ── */
+  .control-toggle-section {
+    background: var(--surface-raised);
+    border: 1px solid var(--border-light);
+    border-radius: var(--border-radius-lg);
+    padding: var(--space-4) var(--space-5);
   }
 
-  /* Options */
+  /* ── Options ── */
   .options-section {
     background: var(--surface-raised);
     border: 1px solid var(--border-light);
     border-radius: var(--border-radius-lg);
     padding: var(--space-5);
   }
+  .options-title { font-size: var(--text-sm); font-weight: var(--font-medium); color: var(--text-primary); margin: 0 0 var(--space-4) 0; }
 
-  .options-title {
-    font-size: var(--text-sm);
-    font-weight: var(--font-medium);
-    color: var(--text-primary);
-    margin: 0 0 var(--space-4) 0;
-  }
-
-  .checkbox-option {
-    display: flex;
-    gap: var(--space-3);
-    cursor: pointer;
-  }
-
+  .checkbox-option { display: flex; gap: var(--space-3); cursor: pointer; }
   .checkbox-option input[type="checkbox"] {
     appearance: none;
-    width: 20px;
-    height: 20px;
+    width: 20px; height: 20px;
     border: 2px solid var(--border-default);
     border-radius: var(--border-radius-sm);
     cursor: pointer;
@@ -582,41 +584,19 @@
     flex-shrink: 0;
     margin-top: 2px;
   }
-
-  .checkbox-option input[type="checkbox"]:checked {
-    background: var(--color-primary);
-    border-color: var(--color-primary);
-  }
-
+  .checkbox-option input[type="checkbox"]:checked { background: var(--color-primary); border-color: var(--color-primary); }
   .checkbox-option input[type="checkbox"]:checked::after {
     content: '';
     position: absolute;
-    left: 6px;
-    top: 2px;
-    width: 4px;
-    height: 9px;
+    left: 6px; top: 2px;
+    width: 4px; height: 9px;
     border: solid white;
     border-width: 0 2px 2px 0;
     transform: rotate(45deg);
   }
-
-  .checkbox-content {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-1);
-  }
-
-  .checkbox-label {
-    font-size: var(--text-sm);
-    font-weight: var(--font-medium);
-    color: var(--text-primary);
-  }
-
-  .checkbox-description {
-    font-size: var(--text-xs);
-    color: var(--text-tertiary);
-    line-height: var(--leading-relaxed);
-  }
+  .checkbox-content { display: flex; flex-direction: column; gap: var(--space-1); }
+  .checkbox-label { font-size: var(--text-sm); font-weight: var(--font-medium); color: var(--text-primary); }
+  .checkbox-description { font-size: var(--text-xs); color: var(--text-tertiary); line-height: var(--leading-relaxed); }
 
   /* Footer */
   .step-footer {
@@ -627,12 +607,6 @@
     padding-top: var(--space-6);
     border-top: 1px solid var(--border-light);
   }
-
-  .footer-spacer {
-    flex: 1;
-  }
-
-  .btn svg {
-    margin-left: var(--space-2);
-  }
+  .footer-spacer { flex: 1; }
+  .btn svg { margin-left: var(--space-2); }
 </style>

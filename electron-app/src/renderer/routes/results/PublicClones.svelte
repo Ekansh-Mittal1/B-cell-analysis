@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { resultsState, publicClonesActions } from '../../lib/stores/app';
+  import { resultsState, publicClonesActions, type CohortType, type CohortResults } from '../../lib/stores/app';
   import {
     computePublicClonesPerTimepoint,
     computePublicClones,
@@ -23,7 +23,7 @@
   ];
 
   // ── Section collapse state ──
-  let sharedOpen = true;
+  let sharedOpen = false;
   let dynamicsOpen = true;
 
   // ── Shared Clones state ──
@@ -52,15 +52,40 @@
     selectedDynamicsEntry = null;
   }
 
+  // ── Cohort state ──
+  $: hasCohorts = $resultsState.cohortResults.length > 0;
+  let selectedCohort: CohortType = 'disease';
+
+  function getActiveCohort(): CohortResults | null {
+    if (!hasCohorts) return null;
+    return $resultsState.cohortResults.find(c => c.cohortType === selectedCohort) || null;
+  }
+
+  // Active data: uses cohort-specific data when cohorts exist, else global
+  $: activeFileGroups = hasCohorts
+    ? (getActiveCohort()?.fileGroups ?? $resultsState.fileGroups)
+    : $resultsState.fileGroups;
+  $: activeTimepointMapping = hasCohorts
+    ? (getActiveCohort()?.timepointMapping ?? $resultsState.timepointMapping)
+    : $resultsState.timepointMapping;
+  $: activeTreeMetadata = hasCohorts
+    ? (getActiveCohort()?.treeMetadata ?? $resultsState.treeMetadata)
+    : $resultsState.treeMetadata;
+
+  // Control cohort data for side-by-side dynamics
+  $: controlCohort = $resultsState.cohortResults.find(c => c.cohortType === 'control') || null;
+  $: diseaseCohort = $resultsState.cohortResults.find(c => c.cohortType === 'disease') || null;
+  let controlDynamicsData: ClonalDynamicsData | null = null;
+  let diseaseDynamicsData: ClonalDynamicsData | null = null;
+
   $: hasResults = $resultsState.publicClonesData !== null;
   $: selectedClone = hasResults && selectedCloneId
     ? $resultsState.publicClonesData!.public_clones.find(c => c.id === selectedCloneId) || null
     : null;
   $: hasTimepoints = timepointLabels.length > 0;
 
-  // Detect available timepoints
   onMount(() => {
-    timepointLabels = getTimepointLabels($resultsState.timepointMapping);
+    timepointLabels = getTimepointLabels(activeTimepointMapping);
     if (timepointLabels.length > 0 && !selectedTimepoint) {
       selectedTimepoint = timepointLabels[0];
     }
@@ -68,40 +93,39 @@
     recomputeDynamics();
   });
 
-  // When timepoint changes, recompute shared clones
-  $: if (selectedTimepoint && $resultsState.fileGroups.length > 0) {
+  // When cohort or timepoint changes, recompute
+  $: if (selectedTimepoint && activeFileGroups.length > 0) {
     recomputeShared();
   }
-
-  function recomputeShared() {
-    if ($resultsState.fileGroups.length === 0) return;
-    const data = hasTimepoints && selectedTimepoint
-      ? computePublicClonesPerTimepoint(
-          $resultsState.fileGroups,
-          $resultsState.timepointMapping,
-          selectedTimepoint,
-          { topN }
-        )
-      : computePublicClones(
-          $resultsState.fileGroups,
-          $resultsState.timepointMapping,
-          { topN }
-        );
-    publicClonesActions.updateResults(data);
-    if (data.top_x.length > 0) {
-      selectedCloneId = data.top_x[0].id;
-    } else {
-      selectedCloneId = null;
+  $: if (hasCohorts && selectedCohort) {
+    timepointLabels = getTimepointLabels(activeTimepointMapping);
+    if (timepointLabels.length > 0 && !timepointLabels.includes(selectedTimepoint)) {
+      selectedTimepoint = timepointLabels[0];
     }
   }
 
+  function recomputeShared() {
+    if (activeFileGroups.length === 0) return;
+    const data = hasTimepoints && selectedTimepoint
+      ? computePublicClonesPerTimepoint(activeFileGroups, activeTimepointMapping, selectedTimepoint, { topN })
+      : computePublicClones(activeFileGroups, activeTimepointMapping, { topN });
+    publicClonesActions.updateResults(data);
+    selectedCloneId = data.top_x.length > 0 ? data.top_x[0].id : null;
+  }
+
   function recomputeDynamics() {
-    if ($resultsState.fileGroups.length === 0) return;
-    dynamicsData = computeClonalDynamicsHeatmap(
-      $resultsState.fileGroups,
-      $resultsState.timepointMapping,
-      dynamicsTopN
-    );
+    if (hasCohorts) {
+      if (diseaseCohort && diseaseCohort.fileGroups.length > 0) {
+        diseaseDynamicsData = computeClonalDynamicsHeatmap(diseaseCohort.fileGroups, diseaseCohort.timepointMapping, dynamicsTopN);
+      }
+      if (controlCohort && controlCohort.fileGroups.length > 0) {
+        controlDynamicsData = computeClonalDynamicsHeatmap(controlCohort.fileGroups, controlCohort.timepointMapping, dynamicsTopN);
+      }
+      dynamicsData = diseaseDynamicsData;
+    } else {
+      if (activeFileGroups.length === 0) return;
+      dynamicsData = computeClonalDynamicsHeatmap(activeFileGroups, activeTimepointMapping, dynamicsTopN);
+    }
   }
 
   function selectClone(cloneId: string) {
@@ -125,10 +149,23 @@
   }
 
   let selectedDynamicsTimepoint: string | null = null;
+  let selectedDynamicsCohortType: CohortType | null = null;
 
   function handleDynamicsCloneClick(entry: ClonalDynamicsEntry, timepoint?: string) {
     selectedDynamicsEntry = entry;
     selectedDynamicsTimepoint = timepoint ?? null;
+  }
+
+  function handleDiseaseCloneClick(entry: ClonalDynamicsEntry, timepoint?: string) {
+    selectedDynamicsEntry = entry;
+    selectedDynamicsTimepoint = timepoint ?? null;
+    selectedDynamicsCohortType = 'disease';
+  }
+
+  function handleControlCloneClick(entry: ClonalDynamicsEntry, timepoint?: string) {
+    selectedDynamicsEntry = entry;
+    selectedDynamicsTimepoint = timepoint ?? null;
+    selectedDynamicsCohortType = 'control';
   }
 
   // Find matching tree for the selected dynamics entry + timepoint
@@ -173,10 +210,18 @@
     return best;
   }
 
+  $: dynamicsTreeMetadata = (() => {
+    if (hasCohorts && selectedDynamicsCohortType) {
+      const cohort = $resultsState.cohortResults.find(c => c.cohortType === selectedDynamicsCohortType);
+      return cohort?.treeMetadata ?? [];
+    }
+    return activeTreeMetadata;
+  })();
+
   $: selectedDynamicsTree = findDynamicsTree(
     selectedDynamicsEntry,
     selectedDynamicsTimepoint,
-    $resultsState.treeMetadata
+    dynamicsTreeMetadata
   );
 
   function getTreeNewickPath(pngPath: string): string {
@@ -258,6 +303,23 @@
                 {#if hasTimepoints}Select a timepoint to view clones shared across patients.{/if}
               </span>
             </div>
+
+            <!-- Cohort selector (when cohorts present) -->
+            {#if hasCohorts}
+              <div class="cohort-selector">
+                <span class="cohort-selector-label">Group:</span>
+                {#each $resultsState.cohortResults as cohort (cohort.cohortType)}
+                  <button
+                    class="cohort-pill cohort-pill-{cohort.cohortType}"
+                    class:active={selectedCohort === cohort.cohortType}
+                    on:click={() => { selectedCohort = cohort.cohortType; recomputeShared(); }}
+                  >
+                    <span class="cohort-pill-dot cohort-dot-{cohort.cohortType}"></span>
+                    {cohort.cohortName}
+                  </button>
+                {/each}
+              </div>
+            {/if}
 
             <!-- Timepoint selector -->
             {#if hasTimepoints}
@@ -446,7 +508,7 @@
             <div class="section-body">
               <!-- Info banner -->
               <div class="info-banner">
-                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" class="info-icon">
+                <svg width="13" height="13" viewBox="0 0 16 16" fill="none" class="info-icon">
                   <circle cx="8" cy="8" r="7" stroke="currentColor" stroke-width="1.5"/>
                   <path d="M8 7v4M8 5.5v0" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
                 </svg>
@@ -462,7 +524,7 @@
               </div>
 
               {#if dynamicsData && dynamicsData.entries.length > 0}
-                <!-- Status filter pills -->
+                <!-- Status filter pills + Top-N control -->
                 <div class="status-filter-row">
                   <span class="status-filter-label">Show:</span>
                   <div class="status-pills">
@@ -484,34 +546,6 @@
                       </button>
                     {/each}
                   </div>
-                </div>
-
-                <!-- Stats -->
-                <div class="dynamics-stats">
-                  <div class="dstat persistent">
-                    <span class="dstat-val">{dynamicsData.stats.persistent}</span>
-                    <span class="dstat-label">Persistent</span>
-                  </div>
-                  <div class="dstat expanding">
-                    <span class="dstat-val">{dynamicsData.stats.expanding}</span>
-                    <span class="dstat-label">Expanding</span>
-                  </div>
-                  <div class="dstat contracting">
-                    <span class="dstat-val">{dynamicsData.stats.contracting}</span>
-                    <span class="dstat-label">Contracting</span>
-                  </div>
-                  <div class="dstat disappeared">
-                    <span class="dstat-val">{dynamicsData.stats.disappeared}</span>
-                    <span class="dstat-label">Disappeared</span>
-                  </div>
-                  <div class="dstat late-emerging">
-                    <span class="dstat-val">{dynamicsData.stats.lateEmerging}</span>
-                    <span class="dstat-label">Late Emerging</span>
-                  </div>
-                </div>
-
-                <!-- Top-N control -->
-                <div class="dynamics-controls">
                   <label class="topn-label">
                     Show top
                     <select bind:value={dynamicsTopN} on:change={handleDynamicsTopNChange}>
@@ -526,124 +560,222 @@
                   </label>
                 </div>
 
-                <!-- 3-column layout: Heatmap | Tree | Detail -->
-                <div class="dynamics-split">
-                  <!-- Left: Heatmap matrix -->
-                  <div class="dynamics-heatmap-section">
-                    <ClonalDynamicsHeatmap
-                      entries={filteredDynamicsEntries}
-                      timepointLabels={dynamicsData.timepointLabels}
-                      timepointTotals={dynamicsData.timepointTotals}
-                      onCloneClick={handleDynamicsCloneClick}
-                    />
+                <!-- Stats (only shown when no cohorts; cohort stats are inline with heatmaps below) -->
+                {#if !(hasCohorts && diseaseDynamicsData && controlDynamicsData)}
+                  <div class="dynamics-stats">
+                    <div class="dstat persistent"><span class="dstat-val">{dynamicsData.stats.persistent}</span><span class="dstat-label">Persistent</span></div>
+                    <div class="dstat expanding"><span class="dstat-val">{dynamicsData.stats.expanding}</span><span class="dstat-label">Expanding</span></div>
+                    <div class="dstat contracting"><span class="dstat-val">{dynamicsData.stats.contracting}</span><span class="dstat-label">Contracting</span></div>
+                    <div class="dstat disappeared"><span class="dstat-val">{dynamicsData.stats.disappeared}</span><span class="dstat-label">Disappeared</span></div>
+                    <div class="dstat late-emerging"><span class="dstat-val">{dynamicsData.stats.lateEmerging}</span><span class="dstat-label">Late Emerging</span></div>
                   </div>
+                {/if}
 
-                  <!-- Middle: Phylogenetic tree -->
-                  <div class="dynamics-tree-panel">
-                    {#if selectedDynamicsEntry}
-                      {#if selectedDynamicsTree}
-                        <div class="dynamics-tree-section">
-                          <div class="dynamics-tree-header">
-                            <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-                              <path d="M8 2v4M8 6H4v4M8 6h4v4M4 10v4M12 10v4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-                            </svg>
-                            <span class="dynamics-tree-title">Phylogenetic Tree</span>
-                            <span class="dynamics-tree-label">{getTreeLabel(selectedDynamicsTree.meta)}</span>
+                {#if hasCohorts && diseaseDynamicsData && controlDynamicsData}
+                  <!-- 2-column layout: side-by-side heatmaps (left) | detail + tree (right) -->
+                  <div class="dynamics-cohort-split">
+                    <!-- Left: side-by-side heatmaps with inline stats -->
+                    <div class="dynamics-cohort-heatmaps">
+                      <div class="dynamics-cohort-hm">
+                        <div class="dynamics-dual-label cohort-label-disease">{diseaseCohort?.cohortName || 'Disease'}</div>
+                        <div class="dynamics-inline-stats">
+                          <div class="dstat-inline persistent"><span class="dstat-val">{diseaseDynamicsData.stats.persistent}</span><span class="dstat-label">Pers.</span></div>
+                          <div class="dstat-inline expanding"><span class="dstat-val">{diseaseDynamicsData.stats.expanding}</span><span class="dstat-label">Exp.</span></div>
+                          <div class="dstat-inline contracting"><span class="dstat-val">{diseaseDynamicsData.stats.contracting}</span><span class="dstat-label">Contr.</span></div>
+                          <div class="dstat-inline disappeared"><span class="dstat-val">{diseaseDynamicsData.stats.disappeared}</span><span class="dstat-label">Disapp.</span></div>
+                          <div class="dstat-inline late-emerging"><span class="dstat-val">{diseaseDynamicsData.stats.lateEmerging}</span><span class="dstat-label">Late</span></div>
+                        </div>
+                        <div style="max-height: calc(100vh - 420px); overflow-y: auto; overflow-x: auto; border: 1px solid var(--border-light); border-radius: 8px;">
+                          <ClonalDynamicsHeatmap
+                            entries={diseaseDynamicsData.entries.filter(e => activeStatuses[e.status])}
+                            timepointLabels={diseaseDynamicsData.timepointLabels}
+                            timepointTotals={diseaseDynamicsData.timepointTotals}
+                            onCloneClick={handleDiseaseCloneClick}
+                          />
+                        </div>
+                      </div>
+                      <div class="dynamics-cohort-hm">
+                        <div class="dynamics-dual-label cohort-label-control">{controlCohort?.cohortName || 'Control'}</div>
+                        <div class="dynamics-inline-stats">
+                          <div class="dstat-inline persistent"><span class="dstat-val">{controlDynamicsData.stats.persistent}</span><span class="dstat-label">Pers.</span></div>
+                          <div class="dstat-inline expanding"><span class="dstat-val">{controlDynamicsData.stats.expanding}</span><span class="dstat-label">Exp.</span></div>
+                          <div class="dstat-inline contracting"><span class="dstat-val">{controlDynamicsData.stats.contracting}</span><span class="dstat-label">Contr.</span></div>
+                          <div class="dstat-inline disappeared"><span class="dstat-val">{controlDynamicsData.stats.disappeared}</span><span class="dstat-label">Disapp.</span></div>
+                          <div class="dstat-inline late-emerging"><span class="dstat-val">{controlDynamicsData.stats.lateEmerging}</span><span class="dstat-label">Late</span></div>
+                        </div>
+                        <div style="max-height: calc(100vh - 420px); overflow-y: auto; overflow-x: auto; border: 1px solid var(--border-light); border-radius: 8px;">
+                          <ClonalDynamicsHeatmap
+                            entries={controlDynamicsData.entries.filter(e => activeStatuses[e.status])}
+                            timepointLabels={controlDynamicsData.timepointLabels}
+                            timepointTotals={controlDynamicsData.timepointTotals}
+                            onCloneClick={handleControlCloneClick}
+                          />
+                        </div>
+                      </div>
+                    </div>
+
+                    <!-- Right: detail bar + tree -->
+                    <div class="dynamics-cohort-right">
+                      {#if selectedDynamicsEntry}
+                        <div class="dynamics-detail-strip">
+                          <div class="dynamics-detail-strip-top">
+                            <h3>{selectedDynamicsEntry.cloneLabel}</h3>
+                            <span class="status-pill {selectedDynamicsEntry.status}">{selectedDynamicsEntry.status.replace('_', ' ')}</span>
+                            {#if selectedDynamicsCohortType}
+                              <span class="cohort-tag-inline cohort-tag-{selectedDynamicsCohortType}">{selectedDynamicsCohortType === 'disease' ? (diseaseCohort?.cohortName || 'Disease') : (controlCohort?.cohortName || 'Control')}</span>
+                            {/if}
                           </div>
-                          <div class="dynamics-tree-container">
-                            <InteractiveTree
-                              newickPath={getTreeNewickPath(selectedDynamicsTree.meta.path)}
-                              treeName={getTreeLabel(selectedDynamicsTree.meta)}
-                              cloneSize={selectedDynamicsTree.meta.clone_size || 0}
-                            />
+                          <div class="dynamics-detail-strip-body">
+                            <span><strong>CDR3:</strong> <code>{selectedDynamicsEntry.cdr3Aa || '(none)'}</code></span>
+                            <span><strong>V:</strong> {selectedDynamicsEntry.vGene}</span>
+                            <span><strong>J:</strong> {selectedDynamicsEntry.jGene}</span>
+                            <span><strong>Total:</strong> {selectedDynamicsEntry.totalRawCount} seqs</span>
+                            {#each selectedDynamicsEntry.timepointSizes as tpSize}
+                              <span class="strip-tp"><strong>{tpSize.label}:</strong> {(tpSize.frequency * 100).toFixed(1)}% ({tpSize.rawCount})</span>
+                            {/each}
                           </div>
                         </div>
+                      {/if}
+
+                      <div class="dynamics-cohort-tree">
+                        {#if selectedDynamicsEntry}
+                          {#if selectedDynamicsTree}
+                            <div class="dynamics-tree-section">
+                              <div class="dynamics-tree-header">
+                                <svg width="10" height="10" viewBox="0 0 16 16" fill="none">
+                                  <path d="M8 2v4M8 6H4v4M8 6h4v4M4 10v4M12 10v4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                                </svg>
+                                <span class="dynamics-tree-title">Phylogenetic Tree</span>
+                                <span class="dynamics-tree-label">{getTreeLabel(selectedDynamicsTree.meta)}</span>
+                              </div>
+                              <div class="dynamics-tree-container">
+                                <InteractiveTree
+                                  newickPath={getTreeNewickPath(selectedDynamicsTree.meta.path)}
+                                  treeName={getTreeLabel(selectedDynamicsTree.meta)}
+                                  cloneSize={selectedDynamicsTree.meta.clone_size || 0}
+                                />
+                              </div>
+                            </div>
+                          {:else}
+                            <div class="dynamics-tree-empty-full">
+                              <svg width="32" height="32" viewBox="0 0 16 16" fill="none">
+                                <path d="M8 2v4M8 6H4v4M8 6h4v4M4 10v4M12 10v4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                              </svg>
+                              <span>No phylogenetic tree available{selectedDynamicsTimepoint ? ` for ${selectedDynamicsTimepoint}` : ''}</span>
+                              <span class="dynamics-tree-hint">Trees are built for the top 20 clones per timepoint. Click a timepoint cell to look up trees.</span>
+                            </div>
+                          {/if}
+                        {:else}
+                          <div class="dynamics-tree-empty-full">
+                            <svg width="32" height="32" viewBox="0 0 16 16" fill="none">
+                              <path d="M8 2v4M8 6H4v4M8 6h4v4M4 10v4M12 10v4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                            </svg>
+                            <span>Select a clone to view its phylogenetic tree</span>
+                          </div>
+                        {/if}
+                      </div>
+                    </div>
+                  </div>
+                {:else}
+                  <!-- Original 3-column layout: Heatmap | Tree | Detail -->
+                  <div class="dynamics-split">
+                    <div class="dynamics-heatmap-section">
+                      <ClonalDynamicsHeatmap
+                        entries={filteredDynamicsEntries}
+                        timepointLabels={dynamicsData.timepointLabels}
+                        timepointTotals={dynamicsData.timepointTotals}
+                        onCloneClick={handleDynamicsCloneClick}
+                      />
+                    </div>
+
+                    <div class="dynamics-tree-panel">
+                      {#if selectedDynamicsEntry}
+                        {#if selectedDynamicsTree}
+                          <div class="dynamics-tree-section">
+                            <div class="dynamics-tree-header">
+                              <svg width="10" height="10" viewBox="0 0 16 16" fill="none">
+                                <path d="M8 2v4M8 6H4v4M8 6h4v4M4 10v4M12 10v4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                              </svg>
+                              <span class="dynamics-tree-title">Phylogenetic Tree</span>
+                              <span class="dynamics-tree-label">{getTreeLabel(selectedDynamicsTree.meta)}</span>
+                            </div>
+                            <div class="dynamics-tree-container">
+                              <InteractiveTree
+                                newickPath={getTreeNewickPath(selectedDynamicsTree.meta.path)}
+                                treeName={getTreeLabel(selectedDynamicsTree.meta)}
+                                cloneSize={selectedDynamicsTree.meta.clone_size || 0}
+                              />
+                            </div>
+                          </div>
+                        {:else}
+                          <div class="dynamics-tree-empty-full">
+                            <svg width="32" height="32" viewBox="0 0 16 16" fill="none">
+                              <path d="M8 2v4M8 6H4v4M8 6h4v4M4 10v4M12 10v4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                            </svg>
+                            <span>No phylogenetic tree available{selectedDynamicsTimepoint ? ` for ${selectedDynamicsTimepoint}` : ''}</span>
+                            <span class="dynamics-tree-hint">Trees are built for the top 20 clones per timepoint. Click a timepoint cell to look up trees.</span>
+                          </div>
+                        {/if}
                       {:else}
                         <div class="dynamics-tree-empty-full">
                           <svg width="32" height="32" viewBox="0 0 16 16" fill="none">
                             <path d="M8 2v4M8 6H4v4M8 6h4v4M4 10v4M12 10v4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
                           </svg>
-                          <span>No phylogenetic tree available{selectedDynamicsTimepoint ? ` for ${selectedDynamicsTimepoint}` : ''}</span>
-                          <span class="dynamics-tree-hint">Trees are built for the top 20 clones per timepoint. Click a timepoint cell to look up trees.</span>
+                          <span>Select a clone to view its phylogenetic tree</span>
                         </div>
                       {/if}
-                    {:else}
-                      <div class="dynamics-tree-empty-full">
-                        <svg width="32" height="32" viewBox="0 0 16 16" fill="none">
-                          <path d="M8 2v4M8 6H4v4M8 6h4v4M4 10v4M12 10v4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-                        </svg>
-                        <span>Select a clone to view its phylogenetic tree</span>
-                      </div>
-                    {/if}
-                  </div>
+                    </div>
 
-                  <!-- Right: Lineage detail -->
-                  <div class="dynamics-detail-panel">
-                    {#if selectedDynamicsEntry}
-                      <div class="dynamics-detail-card">
-                        <div class="dynamics-detail-header">
-                          <h3>{selectedDynamicsEntry.cloneLabel}</h3>
-                          <span class="status-pill {selectedDynamicsEntry.status}">
-                            {selectedDynamicsEntry.status.replace('_', ' ')}
-                          </span>
-                        </div>
-                        <div class="dynamics-detail-body">
-                          <div class="detail-row">
-                            <span class="detail-label">CDR3 AA:</span>
-                            <code>{selectedDynamicsEntry.cdr3Aa || '(none)'}</code>
+                    <div class="dynamics-detail-panel">
+                      {#if selectedDynamicsEntry}
+                        <div class="dynamics-detail-card">
+                          <div class="dynamics-detail-header">
+                            <h3>{selectedDynamicsEntry.cloneLabel}</h3>
+                            <span class="status-pill {selectedDynamicsEntry.status}">{selectedDynamicsEntry.status.replace('_', ' ')}</span>
                           </div>
-                          <div class="detail-row">
-                            <span class="detail-label">V Gene:</span>
-                            <span>{selectedDynamicsEntry.vGene}</span>
-                          </div>
-                          <div class="detail-row">
-                            <span class="detail-label">J Gene:</span>
-                            <span>{selectedDynamicsEntry.jGene}</span>
-                          </div>
-                          <div class="detail-row">
-                            <span class="detail-label">Total seqs:</span>
-                            <span>{selectedDynamicsEntry.totalRawCount} sequences</span>
-                          </div>
-                          <h4 class="tp-sizes-heading">Timepoint Frequencies</h4>
-                          <div class="tp-sizes">
-                            {#each selectedDynamicsEntry.timepointSizes as tpSize}
-                              <div class="tp-size-item">
-                                <span class="tp-size-label">{tpSize.label}</span>
-                                <div class="tp-size-bar-bg">
-                                  <div
-                                    class="tp-size-bar"
-                                    style="width: {Math.max(2, tpSize.frequency / Math.max(0.001, ...selectedDynamicsEntry.timepointSizes.map(t => t.frequency)) * 100)}%"
-                                  ></div>
-                                </div>
-                                <span class="tp-size-val">{(tpSize.frequency * 100).toFixed(2)}%</span>
-                                <span class="tp-size-raw">({tpSize.rawCount})</span>
-                              </div>
-                            {/each}
-                          </div>
-                          {#if selectedDynamicsEntry.cloneIdsByTimepoint}
-                            <h4 class="tp-sizes-heading">Clone IDs by Timepoint</h4>
-                            <div class="clone-ids-by-tp">
-                              {#each Object.entries(selectedDynamicsEntry.cloneIdsByTimepoint) as [tp, cids]}
-                                <div class="clone-tp-row">
-                                  <span class="clone-tp-label">{tp}:</span>
-                                  <span class="clone-tp-ids">{cids.join(', ')}</span>
+                          <div class="dynamics-detail-body">
+                            <div class="detail-row"><span class="detail-label">CDR3 AA:</span><code>{selectedDynamicsEntry.cdr3Aa || '(none)'}</code></div>
+                            <div class="detail-row"><span class="detail-label">V Gene:</span><span>{selectedDynamicsEntry.vGene}</span></div>
+                            <div class="detail-row"><span class="detail-label">J Gene:</span><span>{selectedDynamicsEntry.jGene}</span></div>
+                            <div class="detail-row"><span class="detail-label">Total seqs:</span><span>{selectedDynamicsEntry.totalRawCount} sequences</span></div>
+                            <h4 class="tp-sizes-heading">Timepoint Frequencies</h4>
+                            <div class="tp-sizes">
+                              {#each selectedDynamicsEntry.timepointSizes as tpSize}
+                                <div class="tp-size-item">
+                                  <span class="tp-size-label">{tpSize.label}</span>
+                                  <div class="tp-size-bar-bg">
+                                    <div class="tp-size-bar" style="width: {Math.max(2, tpSize.frequency / Math.max(0.001, ...selectedDynamicsEntry.timepointSizes.map(t => t.frequency)) * 100)}%"></div>
+                                  </div>
+                                  <span class="tp-size-val">{(tpSize.frequency * 100).toFixed(2)}%</span>
+                                  <span class="tp-size-raw">({tpSize.rawCount})</span>
                                 </div>
                               {/each}
                             </div>
-                          {/if}
+                            {#if selectedDynamicsEntry.cloneIdsByTimepoint}
+                              <h4 class="tp-sizes-heading">Clone IDs by Timepoint</h4>
+                              <div class="clone-ids-by-tp">
+                                {#each Object.entries(selectedDynamicsEntry.cloneIdsByTimepoint) as [tp, cids]}
+                                  <div class="clone-tp-row">
+                                    <span class="clone-tp-label">{tp}:</span>
+                                    <span class="clone-tp-ids">{cids.join(', ')}</span>
+                                  </div>
+                                {/each}
+                              </div>
+                            {/if}
+                          </div>
                         </div>
-                      </div>
-                    {:else}
-                      <div class="dynamics-empty-detail">
-                        <svg width="40" height="40" viewBox="0 0 40 40" fill="none">
-                          <rect x="4" y="8" width="32" height="24" rx="3" stroke="currentColor" stroke-width="1.5"/>
-                          <path d="M4 14h32M14 14v18" stroke="currentColor" stroke-width="1.5"/>
-                        </svg>
-                        <p>Select a lineage from the heatmap to view details</p>
-                      </div>
-                    {/if}
+                      {:else}
+                        <div class="dynamics-empty-detail">
+                          <svg width="40" height="40" viewBox="0 0 40 40" fill="none">
+                            <rect x="4" y="8" width="32" height="24" rx="3" stroke="currentColor" stroke-width="1.5"/>
+                            <path d="M4 14h32M14 14v18" stroke="currentColor" stroke-width="1.5"/>
+                          </svg>
+                          <p>Select a lineage from the heatmap to view details</p>
+                        </div>
+                      {/if}
+                    </div>
                   </div>
-                </div>
+                {/if}
               {:else}
                 <div class="empty-inline">
                   Clonal dynamics require at least 2 timepoints with clonal data.
@@ -671,10 +803,10 @@
     flex: 1;
     min-height: 0;
     overflow-y: auto;
-    padding: var(--space-4);
+    padding: var(--space-2) var(--space-4);
     display: flex;
     flex-direction: column;
-    gap: var(--space-4);
+    gap: var(--space-2);
   }
 
   /* ── Empty / Loading states ── */
@@ -765,20 +897,21 @@
   }
 
   .section-body {
-    padding: 0 var(--space-5) var(--space-5);
+    padding: 0 var(--space-4) var(--space-3);
     display: flex;
     flex-direction: column;
-    gap: var(--space-4);
+    gap: var(--space-2);
   }
 
   /* ── Info banner ── */
   .info-banner {
     display: flex;
     align-items: flex-start;
-    gap: var(--space-3);
-    padding: var(--space-3) var(--space-4);
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
     background: var(--color-info-light);
     border-radius: var(--border-radius-md);
+    font-size: var(--text-xs);
     font-size: var(--text-sm);
     color: var(--text-secondary);
     line-height: var(--leading-relaxed);
@@ -994,8 +1127,11 @@
   .status-filter-row {
     display: flex;
     align-items: center;
-    gap: var(--space-3);
-    margin-bottom: var(--space-4);
+    gap: var(--space-2);
+    margin-bottom: 0;
+  }
+  .status-filter-row .topn-label {
+    margin-left: auto;
   }
   .status-filter-label {
     font-size: var(--text-sm);
@@ -1069,11 +1205,6 @@
   .dstat.late-emerging { background: #FFF3E0; }
   .dstat.late-emerging .dstat-val { color: #E65100; }
   .dstat.late-emerging .dstat-label { color: #E65100; }
-
-  .dynamics-controls {
-    display: flex;
-    justify-content: flex-end;
-  }
 
   /* ── Dynamics 3-column layout (heatmap | tree | detail) ── */
   .dynamics-split {
@@ -1227,23 +1358,24 @@
   .dynamics-tree-header {
     display: flex;
     align-items: center;
-    gap: var(--space-2);
-    padding: var(--space-2) var(--space-3);
+    gap: var(--space-1);
+    padding: 2px var(--space-2);
     background: var(--gray-50);
     border-bottom: 1px solid var(--border-light);
     color: var(--text-secondary);
     flex-shrink: 0;
+    line-height: 1;
   }
 
   .dynamics-tree-title {
-    font-size: var(--text-xs);
+    font-size: 10px;
     font-weight: var(--font-semibold);
     text-transform: uppercase;
     letter-spacing: 0.03em;
   }
 
   .dynamics-tree-label {
-    font-size: var(--text-xs);
+    font-size: 10px;
     color: var(--text-tertiary);
     margin-left: auto;
   }
@@ -1304,4 +1436,173 @@
     color: var(--text-tertiary);
     font-family: var(--font-mono, monospace);
   }
+
+  /* ── Cohort selector pills ── */
+  .cohort-selector {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+  }
+  .cohort-selector-label {
+    font-size: var(--text-xs);
+    font-weight: var(--font-semibold);
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .cohort-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-1) var(--space-3);
+    border: 1px solid var(--border-default);
+    border-radius: var(--border-radius-full);
+    background: var(--surface-raised);
+    font-size: var(--text-xs);
+    font-weight: var(--font-medium);
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: all var(--transition-fast);
+  }
+  .cohort-pill.active {
+    border-color: transparent;
+  }
+  .cohort-pill-disease.active { background: #E3F2FD; color: #1565C0; }
+  .cohort-pill-control.active { background: #F5F5F5; color: #616161; }
+  .cohort-pill:hover { opacity: 0.85; }
+  .cohort-pill-dot { width: 6px; height: 6px; border-radius: 50%; }
+  .cohort-dot-disease { background: #1565C0; }
+  .cohort-dot-control { background: #757575; }
+
+  /* ── Cohort dynamics: 2-column (heatmaps | detail+tree) ── */
+  .dynamics-cohort-split {
+    display: flex;
+    gap: var(--space-4);
+    flex: 1;
+    min-height: 0;
+    height: calc(100vh - 280px);
+    overflow: hidden;
+  }
+
+  .dynamics-cohort-heatmaps {
+    display: flex;
+    gap: var(--space-3);
+    flex: 0 0 auto;
+    min-width: 0;
+    height: 100%;
+  }
+
+  .dynamics-cohort-hm {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    height: 100%;
+    overflow: hidden;
+  }
+
+  .dynamics-dual-label {
+    font-size: var(--text-xs);
+    font-weight: var(--font-bold);
+    padding: 2px var(--space-3);
+    border-radius: var(--border-radius-sm) var(--border-radius-sm) 0 0;
+    text-align: center;
+    flex-shrink: 0;
+  }
+  .cohort-label-disease { background: #E3F2FD; color: #1565C0; }
+  .cohort-label-control { background: #F5F5F5; color: #616161; }
+
+  .dynamics-cohort-right {
+    flex: 1;
+    min-width: 0;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    overflow: hidden;
+  }
+
+  .dynamics-detail-strip {
+    flex-shrink: 0;
+    background: var(--surface-raised);
+    border: 1px solid var(--border-light);
+    border-radius: var(--border-radius-md);
+    padding: var(--space-2) var(--space-4);
+  }
+  .dynamics-detail-strip-top {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+  }
+  .dynamics-detail-strip-top h3 {
+    font-size: var(--text-sm);
+    font-weight: var(--font-semibold);
+    margin: 0;
+  }
+  .dynamics-detail-strip-body {
+    display: flex;
+    gap: var(--space-4);
+    font-size: var(--text-xs);
+    color: var(--text-secondary);
+    margin-top: var(--space-1);
+    flex-wrap: wrap;
+  }
+  .dynamics-detail-strip-body code {
+    font-size: 10px;
+    background: var(--gray-100);
+    padding: 1px 4px;
+    border-radius: var(--border-radius-sm);
+  }
+  .strip-tp {
+    white-space: nowrap;
+  }
+
+  .cohort-tag-inline {
+    font-size: var(--text-xs);
+    font-weight: var(--font-semibold);
+    padding: 1px var(--space-2);
+    border-radius: var(--border-radius-full);
+  }
+  .cohort-tag-disease { background: #E3F2FD; color: #1565C0; }
+  .cohort-tag-control { background: #F5F5F5; color: #616161; }
+
+  .dynamics-cohort-tree {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* ── Inline stats inside each heatmap column ── */
+  .dynamics-inline-stats {
+    display: flex;
+    gap: 2px;
+    flex-shrink: 0;
+    padding: var(--space-1) 0;
+  }
+  .dstat-inline {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 3px 2px;
+    border-radius: var(--border-radius-sm);
+  }
+  .dstat-inline .dstat-val {
+    font-size: var(--text-sm);
+    font-weight: var(--font-bold);
+  }
+  .dstat-inline .dstat-label {
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    opacity: 0.8;
+  }
+  .dstat-inline.persistent { background: #E3F2FD; color: #1565C0; }
+  .dstat-inline.expanding { background: #E8F5E9; color: #2E7D32; }
+  .dstat-inline.contracting { background: #FFF3E0; color: #E65100; }
+  .dstat-inline.disappeared { background: #F5F5F5; color: #757575; }
+  .dstat-inline.late-emerging { background: #FFF8E1; color: #F57F17; }
+
 </style>

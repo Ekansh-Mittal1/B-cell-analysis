@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { resultsState, studyDesign } from '../../lib/stores/app';
+  import { resultsState, studyDesign, type StudyDesign, type TimepointMapping, type FileGroup, GROUP_COLORS } from '../../lib/stores/app';
   import {
     computeAllMetrics,
     computePerFileMetrics,
@@ -17,11 +17,57 @@
   import ExpansionDynamicsChart from '../../lib/components/visualizations/ExpansionDynamicsChart.svelte';
   import ShmAccumulationChart from '../../lib/components/visualizations/ShmAccumulationChart.svelte';
 
+  function buildDesignFromTimepointMapping(tpMapping: TimepointMapping, fileGroups: FileGroup[]): StudyDesign {
+    const fileGroupNames = new Set(fileGroups.map(fg => fg.filename));
+    const tpMap = new Map<string, string[]>();
+    const tpOrder: string[] = [];
+    for (const [stagedFile, entry] of Object.entries(tpMapping)) {
+      if (!fileGroupNames.has(stagedFile)) continue;
+      if (!tpMap.has(entry.timepoint)) {
+        tpMap.set(entry.timepoint, []);
+        tpOrder.push(entry.timepoint);
+      }
+      tpMap.get(entry.timepoint)!.push(stagedFile);
+    }
+    if (tpMap.size === 0) return { groups: [], unassigned: [] };
+    return {
+      groups: [{
+        id: 'cohort-auto',
+        name: 'All Samples',
+        color: GROUP_COLORS[0],
+        timepoints: tpOrder.map((label, i) => ({
+          id: `tp-${i}`,
+          label,
+          order: i,
+          files: tpMap.get(label) || []
+        }))
+      }],
+      unassigned: []
+    };
+  }
+
+  // ── Cohort awareness ─────────────────────────────────────
+  $: hasCohorts = $resultsState.cohortResults.length > 0;
+  $: diseaseCohort = $resultsState.cohortResults.find(c => c.cohortType === 'disease') || null;
+  $: controlCohort = $resultsState.cohortResults.find(c => c.cohortType === 'control') || null;
+  let selectedCohortType: 'disease' | 'control' = 'disease';
+
+  $: activeCohort = hasCohorts
+    ? (selectedCohortType === 'control' ? controlCohort : diseaseCohort)
+    : null;
+
+  $: activeSequences = activeCohort ? activeCohort.sequences : $resultsState.sequences;
+  $: activeFileGroups = activeCohort ? activeCohort.fileGroups : $resultsState.fileGroups;
+  $: activeDesign = activeCohort
+    ? buildDesignFromTimepointMapping(activeCohort.timepointMapping, activeCohort.fileGroups)
+    : $studyDesign;
+
   // ── Filter state ─────────────────────────────────────────
   let enabledGroups = new Set<string>();
   let enabledTimepoints = new Set<string>();
-  let enabledSamples = new Set<string>(); // Per-sample comparison: which patients/samples to show
+  let enabledSamples = new Set<string>();
   let initialized = false;
+  let lastCohortKey = '';
 
   // ── Section collapse state ───────────────────────────────
   let perTimepointOpen = true;
@@ -36,27 +82,22 @@
   let hasLongitudinal = false;
 
   $: {
-    const design = $studyDesign;
+    const design = activeDesign;
     hasDesign = design.groups.length > 0;
 
-    console.log('[Dashboard] Reactive update:');
-    console.log('  hasDesign:', hasDesign);
-    console.log('  sequences:', $resultsState.sequences.length);
-    console.log('  fileGroups:', $resultsState.fileGroups.length);
-    console.log('  studyDesign.groups:', design.groups.length);
-
-    if (hasDesign) {
-      console.log('  Computing metrics with study design');
-      allMetrics = computeAllMetrics(design, $resultsState.sequences, $resultsState.fileGroups);
-      longitudinalData = computeLongitudinalAnalysis(design, $resultsState.sequences, $resultsState.fileGroups);
-    } else {
-      console.log('  Computing per-file metrics (no study design)');
-      allMetrics = computePerFileMetrics($resultsState.fileGroups);
-      longitudinalData = [];
+    const cohortKey = hasCohorts ? selectedCohortType : 'none';
+    if (cohortKey !== lastCohortKey) {
+      initialized = false;
+      lastCohortKey = cohortKey;
     }
 
-    console.log('  allMetrics:', allMetrics.length);
-    console.log('  longitudinalData:', longitudinalData.length);
+    if (hasDesign) {
+      allMetrics = computeAllMetrics(design, activeSequences, activeFileGroups);
+      longitudinalData = computeLongitudinalAnalysis(design, activeSequences, activeFileGroups);
+    } else {
+      allMetrics = computePerFileMetrics(activeFileGroups);
+      longitudinalData = [];
+    }
 
     hasLongitudinal = longitudinalData.length > 0;
 
@@ -69,16 +110,14 @@
     filteredMetrics = allMetrics.filter(m =>
       enabledGroups.has(m.groupId) && enabledTimepoints.has(m.timepointLabel)
     );
-
-    console.log('  filteredMetrics:', filteredMetrics.length);
   }
 
   $: filteredTimepointCount = new Set(filteredMetrics.map(m => m.timepointLabel)).size;
 
   // Per-sample metrics (one per file within selected timepoints)
   $: perSampleMetrics = computePerSampleMetrics(
-    hasDesign ? $studyDesign : null,
-    $resultsState.fileGroups,
+    hasDesign ? activeDesign : null,
+    activeFileGroups,
     enabledGroups,
     enabledTimepoints
   );
@@ -135,8 +174,8 @@
   $: totalClones = filteredMetrics.reduce((a, m) => a + m.diversity.uniqueClones, 0);
   $: totalFiles = filteredMetrics.reduce((a, m) => {
     if (hasDesign) {
-      const design = $studyDesign;
-      const g = design.groups.find(g => g.id === m.groupId);
+      const d = activeDesign;
+      const g = d.groups.find(g => g.id === m.groupId);
       const tp = g?.timepoints.find(t => t.id === m.timepointId);
       return a + (tp?.files.length || 0);
     }
@@ -175,21 +214,50 @@
       <p>No data available yet. Run an analysis first.</p>
     </div>
   {:else}
+    <!-- Cohort selector (when cohorts exist) -->
+    {#if hasCohorts}
+      <div class="cohort-selector">
+        <span class="cohort-selector-label">Cohort:</span>
+        {#if diseaseCohort}
+          <button
+            class="cohort-toggle"
+            class:active={selectedCohortType === 'disease'}
+            class:cohort-disease={true}
+            on:click={() => selectedCohortType = 'disease'}
+          >
+            {diseaseCohort.cohortName}
+          </button>
+        {/if}
+        {#if controlCohort}
+          <button
+            class="cohort-toggle"
+            class:active={selectedCohortType === 'control'}
+            class:cohort-control={true}
+            on:click={() => selectedCohortType = 'control'}
+          >
+            {controlCohort.cohortName}
+          </button>
+        {/if}
+      </div>
+    {/if}
+
     <!-- Filter bar -->
     <div class="filter-bar">
-      <div class="filter-section">
-        <span class="filter-label">Groups:</span>
-        {#each uniqueGroups as group (group.id)}
-          <button
-            class="filter-pill"
-            class:active={enabledGroups.has(group.id)}
-            on:click={() => toggleGroup(group.id)}
-          >
-            <span class="pill-dot" style="background: {group.color}"></span>
-            {group.name}
-          </button>
-        {/each}
-      </div>
+      {#if !hasCohorts}
+        <div class="filter-section">
+          <span class="filter-label">Groups:</span>
+          {#each uniqueGroups as group (group.id)}
+            <button
+              class="filter-pill"
+              class:active={enabledGroups.has(group.id)}
+              on:click={() => toggleGroup(group.id)}
+            >
+              <span class="pill-dot" style="background: {group.color}"></span>
+              {group.name}
+            </button>
+          {/each}
+        </div>
+      {/if}
       {#if hasDesign && uniqueTimepoints.length > 1}
         <div class="filter-section">
           <span class="filter-label">Timepoints:</span>
@@ -204,7 +272,7 @@
           {/each}
         </div>
       {/if}
-      {#if !hasDesign}
+      {#if !hasDesign && !hasCohorts}
         <button class="organize-link" on:click={goToOrganizer}>
           Organize files into groups for richer comparisons &amp; longitudinal analysis
         </button>
@@ -539,6 +607,48 @@
     font-size: var(--text-xl);
     font-weight: var(--font-semibold);
     color: var(--text-primary);
+  }
+
+  /* ── Cohort selector ─────────── */
+  .cohort-selector {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin-bottom: var(--space-3);
+  }
+  .cohort-selector-label {
+    font-size: var(--text-xs);
+    font-weight: var(--font-semibold);
+    text-transform: uppercase;
+    letter-spacing: var(--tracking-wide);
+    color: var(--text-tertiary);
+  }
+  .cohort-toggle {
+    padding: 5px 16px;
+    border: 2px solid var(--border-light);
+    border-radius: var(--border-radius-full);
+    background: var(--surface-raised);
+    font-size: var(--text-sm);
+    font-weight: var(--font-medium);
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: all var(--transition-fast);
+  }
+  .cohort-toggle.active.cohort-disease {
+    border-color: #1565C0;
+    background: #E3F2FD;
+    color: #1565C0;
+    font-weight: var(--font-semibold);
+  }
+  .cohort-toggle.active.cohort-control {
+    border-color: #616161;
+    background: #F5F5F5;
+    color: #424242;
+    font-weight: var(--font-semibold);
+  }
+  .cohort-toggle:hover:not(.active) {
+    border-color: var(--gray-300);
+    background: var(--gray-50);
   }
 
   /* ── Filter bar ──────────────── */

@@ -1,14 +1,28 @@
 <script lang="ts">
-  import { resultsState } from '../../lib/stores/app';
+  import { resultsState, type CohortType, type CovidMatchData } from '../../lib/stores/app';
 
   let selectedCloneId: number | null = null;
 
-  $: covidData = $resultsState.covidMatchData;
+  $: hasCohorts = $resultsState.cohortResults.length > 0;
+  let selectedCohort: CohortType = 'disease';
+
+  $: diseaseCovid = $resultsState.cohortResults.find(c => c.cohortType === 'disease')?.covidMatchData || null;
+  $: controlCovid = $resultsState.cohortResults.find(c => c.cohortType === 'control')?.covidMatchData || null;
+  $: diseaseName = $resultsState.cohortResults.find(c => c.cohortType === 'disease')?.cohortName || 'Disease';
+  $: controlName = $resultsState.cohortResults.find(c => c.cohortType === 'control')?.cohortName || 'Control';
+
+  $: covidData = hasCohorts
+    ? (selectedCohort === 'disease' ? diseaseCovid : controlCovid)
+    : $resultsState.covidMatchData;
   $: selectedClone = covidData?.top_clones.find(c => c.clone_id === selectedCloneId);
   
-  // Auto-select first clone if none selected
   $: if (covidData && !selectedCloneId && covidData.top_clones.length > 0) {
     selectedCloneId = covidData.top_clones[0].clone_id;
+  }
+
+  function switchCohort(type: CohortType) {
+    selectedCohort = type;
+    selectedCloneId = null;
   }
 
   function selectClone(cloneId: number) {
@@ -16,10 +30,13 @@
   }
 
   function formatFileList(files: string[]): string {
-    if (files.length <= 3) {
-      return files.join(', ');
-    }
+    if (files.length <= 3) return files.join(', ');
     return `${files.slice(0, 3).join(', ')} (+${files.length - 3} more)`;
+  }
+
+  function highMatchPercent(data: CovidMatchData | null): string {
+    if (!data || data.stats.total_clones_analyzed === 0) return '0%';
+    return ((data.stats.clones_with_high_matches / data.stats.total_clones_analyzed) * 100).toFixed(1) + '%';
   }
 </script>
 
@@ -33,6 +50,40 @@
       <p>Enable COVID database matching in the wizard to see results here.</p>
     </div>
   {:else}
+    <!-- Cohort selector (when cohorts present) -->
+    {#if hasCohorts}
+      <div class="covid-cohort-bar">
+        <div class="covid-cohort-pills">
+          <span class="covid-cohort-label">Group:</span>
+          {#each $resultsState.cohortResults as cohort (cohort.cohortType)}
+            {#if cohort.covidMatchData}
+              <button
+                class="covid-cohort-pill covid-pill-{cohort.cohortType}"
+                class:active={selectedCohort === cohort.cohortType}
+                on:click={() => switchCohort(cohort.cohortType)}
+              >
+                <span class="covid-pill-dot covid-dot-{cohort.cohortType}"></span>
+                {cohort.cohortName}
+              </button>
+            {/if}
+          {/each}
+        </div>
+        {#if diseaseCovid && controlCovid}
+          <div class="covid-comparison-banner">
+            <span class="comparison-item disease">
+              <strong>{diseaseName}:</strong>
+              {diseaseCovid.stats.clones_with_high_matches} high matches ({highMatchPercent(diseaseCovid)} of clones)
+            </span>
+            <span class="comparison-divider">|</span>
+            <span class="comparison-item control">
+              <strong>{controlName}:</strong>
+              {controlCovid.stats.clones_with_high_matches} high matches ({highMatchPercent(controlCovid)} of clones)
+            </span>
+          </div>
+        {/if}
+      </div>
+    {/if}
+
     <!-- Stats Dashboard -->
     <div class="stats-grid">
       <div class="stat-card">
@@ -795,4 +846,61 @@
   .alignment-rows::-webkit-scrollbar-thumb:hover {
     background: var(--border-hover);
   }
+
+  /* ── Cohort selector for COVID matching ── */
+  .covid-cohort-bar {
+    padding: var(--space-3) var(--space-4);
+    background: var(--surface-raised);
+    border-bottom: 1px solid var(--border-default);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+  }
+  .covid-cohort-pills {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+  .covid-cohort-label {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .covid-cohort-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 12px;
+    border: 1px solid var(--border-default);
+    border-radius: 100px;
+    background: var(--surface-raised);
+    font-size: 0.75rem;
+    font-weight: 500;
+    color: var(--text-muted);
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .covid-cohort-pill.active { border-color: transparent; }
+  .covid-pill-disease.active { background: #E3F2FD; color: #1565C0; }
+  .covid-pill-control.active { background: #F5F5F5; color: #616161; }
+  .covid-pill-dot { width: 6px; height: 6px; border-radius: 50%; }
+  .covid-dot-disease { background: #1565C0; }
+  .covid-dot-control { background: #757575; }
+
+  .covid-comparison-banner {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-2) var(--space-3);
+    background: var(--surface-base);
+    border: 1px solid var(--border-default);
+    border-radius: var(--border-radius-sm);
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+  }
+  .comparison-item.disease { color: #1565C0; }
+  .comparison-item.control { color: #616161; }
+  .comparison-divider { color: var(--border-default); }
 </style>

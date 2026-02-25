@@ -22,12 +22,14 @@ interface PipelineConfig {
   database_v?: string;
   database_d?: string;
   database_j?: string;
-  database_c?: string;  // Optional C gene for isotype (IgG/IgM/etc.)
+  database_c?: string;
   output_dir?: string;
-  clone_mode?: 'allele' | 'gene';  // V/J gene matching: allele (strict) or gene (permissive)
-  linkage_method?: 'single' | 'average' | 'complete';  // Clustering linkage method
-  run_covid_matching?: boolean;  // Enable COVID database matching
-  cov_abdab_database_path?: string;  // Path to CoV-AbDab CSV file
+  clone_mode?: 'allele' | 'gene';
+  linkage_method?: 'single' | 'average' | 'complete';
+  run_covid_matching?: boolean;
+  cov_abdab_database_path?: string;
+  cohort_type?: string;
+  cohort_name?: string;
 }
 
 interface RunCallbacks {
@@ -55,6 +57,13 @@ export class BackendRunner {
    * Run the analysis pipeline
    */
   run(config: PipelineConfig, callbacks: RunCallbacks): void {
+    // Close stale readline interface from a previous run (process already exited
+    // but its exit handler hasn't fired yet, or was replaced before cleanup)
+    if (this.rl) {
+      this.rl.close();
+      this.rl = null;
+    }
+
     const pipelineScript = path.join(this.options.backendDir, 'pipeline_runner.py');
     
     // Prepare environment
@@ -73,6 +82,10 @@ export class BackendRunner {
       detached: true  // Create new process group
     });
 
+    // Capture reference so the exit handler only cleans up *this* process,
+    // not a newer one that may have been spawned in the meantime (multi-cohort).
+    const spawnedProcess = this.process;
+
     // Unref the process so it doesn't keep the Node process alive
     this.process.unref();
 
@@ -86,6 +99,8 @@ export class BackendRunner {
       input: this.process.stdout,
       crlfDelay: Infinity
     });
+
+    const spawnedRl = this.rl;
 
     // Handle each line of NDJSON output
     this.rl.on('line', (line: string) => {
@@ -103,7 +118,17 @@ export class BackendRunner {
     // Handle process exit
     this.process.on('exit', (code: number | null, signal: string | null) => {
       console.log(`Backend process exited with code ${code}, signal ${signal}`);
-      this.cleanup();
+
+      // Only clean up if this.process still points to the process that exited.
+      // During multi-cohort runs a new process may already have been spawned,
+      // and we must not kill it.
+      if (this.process === spawnedProcess) {
+        this.process = null;
+      }
+      if (this.rl === spawnedRl) {
+        spawnedRl.close();
+        this.rl = null;
+      }
       
       if (code !== 0 && code !== null) {
         callbacks.onComplete({ 
@@ -117,7 +142,9 @@ export class BackendRunner {
     this.process.on('error', (error: Error) => {
       console.error('Backend process error:', error);
       callbacks.onError(error);
-      this.cleanup();
+      if (this.process === spawnedProcess) {
+        this.cleanup();
+      }
     });
 
     // Send the configuration to start the pipeline

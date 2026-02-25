@@ -277,7 +277,8 @@ export function setupIpcHandlers(
 
       // Set up event forwarding to renderer
       const onProgress = (data: any) => {
-        mainWindow?.webContents.send('pipeline:progress', data);
+        const tagged = config.cohort_type ? { ...data, cohort_type: config.cohort_type, cohort_name: config.cohort_name } : data;
+        mainWindow?.webContents.send('pipeline:progress', tagged);
       };
       
       const onLog = (data: any) => {
@@ -285,12 +286,14 @@ export function setupIpcHandlers(
       };
       
       const onResult = (data: any) => {
-        mainWindow?.webContents.send('pipeline:result', data);
+        const tagged = config.cohort_type ? { ...data, cohort_type: config.cohort_type, cohort_name: config.cohort_name } : data;
+        mainWindow?.webContents.send('pipeline:result', tagged);
       };
       
       const onThresholdRequest = (data: any) => {
         console.log('[IPC] onThresholdRequest callback called with:', data);
-        mainWindow?.webContents.send('pipeline:threshold-request', data);
+        const tagged = config.cohort_type ? { ...data, cohort_type: config.cohort_type, cohort_name: config.cohort_name } : data;
+        mainWindow?.webContents.send('pipeline:threshold-request', tagged);
         console.log('[IPC] Sent pipeline:threshold-request to renderer');
       };
       
@@ -311,8 +314,14 @@ export function setupIpcHandlers(
           }
         }
         
-        mainWindow?.webContents.send('pipeline:complete', data);
-        resolve(data);
+        const completeData = {
+          ...data,
+          cohort_type: config.cohort_type,
+          cohort_name: config.cohort_name,
+          output_dir: outputDir
+        };
+        mainWindow?.webContents.send('pipeline:complete', completeData);
+        resolve(completeData);
       };
       
       const onError = (error: Error) => {
@@ -346,7 +355,7 @@ export function setupIpcHandlers(
   // Load results from disk (restore after sleep/minimize)
   // Uses pure Node/TS loader - no Python subprocess, guarantees correct directory
   // Optional: save previous session's study design before loading (outputDir + design)
-  ipcMain.handle('pipeline:loadResults', async (event, outputDir: string, savePrevious?: { outputDir: string; design: any }) => {
+  ipcMain.handle('pipeline:loadResults', async (event, outputDir: string, savePrevious?: { outputDir: string; design: any }, cohorts?: { cohortType: string; cohortName: string; outputDir: string }[]) => {
     const webContents = event.sender;
     const resolvedDir = path.resolve(outputDir);
 
@@ -362,32 +371,60 @@ export function setupIpcHandlers(
       }
     }
 
-    console.log('[IPC] Load results for:', resolvedDir);
+    console.log('[IPC] Load results for:', resolvedDir, 'cohorts:', cohorts?.length ?? 0);
 
     return new Promise((resolve, reject) => {
       const send = (channel: string, data: any) => {
         try { webContents.send(channel, data); } catch (e) { console.warn('[IPC] Failed to send', channel, e); }
       };
-      const onProgress = (data: any) => send('pipeline:progress', data);
-      const onLog = (data: any) => send('pipeline:log', data);
-      const onResult = (data: any) => send('pipeline:result', data);
-      const onComplete = (data: any) => {
-        send('pipeline:complete', data);
-        resolve(data);
-      };
 
-      try {
-        loadResultsFromDisk(resolvedDir, {
-          onProgress,
-          onLog,
-          onResult,
-          onComplete
-        });
-      } catch (err: any) {
-        console.error('[IPC] Load results error:', err);
-        send('pipeline:error', { message: err?.message ?? String(err) });
-        send('pipeline:complete', { success: false, error: err?.message ?? String(err) });
-        resolve({ success: false, error: err?.message ?? String(err) });
+      if (cohorts && cohorts.length > 0) {
+        // Multi-cohort load: load each cohort's output dir separately, tagging results
+        let completedCount = 0;
+        const totalCohorts = cohorts.length;
+
+        for (const cohort of cohorts) {
+          const cohortDir = path.resolve(cohort.outputDir);
+          console.log('[IPC] Loading cohort:', cohort.cohortType, cohort.cohortName, cohortDir);
+
+          const tag = (data: any) => ({ ...data, cohort_type: cohort.cohortType, cohort_name: cohort.cohortName });
+
+          loadResultsFromDisk(cohortDir, {
+            onProgress: (data) => send('pipeline:progress', tag(data)),
+            onLog: (data) => send('pipeline:log', data),
+            onResult: (data) => send('pipeline:result', tag(data)),
+            onComplete: (data) => {
+              send('pipeline:complete', { ...tag(data), output_dir: cohortDir });
+              completedCount++;
+              if (completedCount >= totalCohorts) {
+                resolve(data);
+              }
+            }
+          });
+        }
+      } else {
+        // Single-cohort / legacy load
+        const onProgress = (data: any) => send('pipeline:progress', data);
+        const onLog = (data: any) => send('pipeline:log', data);
+        const onResult = (data: any) => send('pipeline:result', data);
+        const onComplete = (data: any) => {
+          send('pipeline:complete', data);
+          resolve(data);
+        };
+
+        try {
+          loadResultsFromDisk(resolvedDir, {
+            onProgress,
+            onLog,
+            onResult,
+            onComplete
+          });
+        } catch (err: any) {
+          console.error('[IPC] Load results error:', err);
+          send('pipeline:error', { message: err?.message ?? String(err) });
+          send('pipeline:complete', { success: false, error: err?.message ?? String(err) });
+          resolve({ success: false, error: err?.message ?? String(err) });
+        }
       }
     });
   });

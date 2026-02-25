@@ -51,12 +51,16 @@ interface PipelineConfig {
   cov_abdab_database_path?: string;
   study_name?: string;
   timepoints?: { label: string; files: string[] }[];
+  cohort_type?: string;
+  cohort_name?: string;
 }
 
 interface ProgressData {
   stage: string;
   percent: number;
   message: string;
+  cohort_type?: string;
+  cohort_name?: string;
 }
 
 interface LogData {
@@ -68,16 +72,23 @@ interface ResultData {
   artifact: string;
   path?: string;
   data?: any;
+  cohort_type?: string;
+  cohort_name?: string;
 }
 
 interface ThresholdRequestData {
   calculated: number;
   timepoint_thresholds?: { label: string; calculated: number }[];
+  cohort_type?: string;
+  cohort_name?: string;
 }
 
 interface CompleteData {
   success: boolean;
   error?: string;
+  cohort_type?: string;
+  cohort_name?: string;
+  output_dir?: string;
 }
 
 interface ErrorData {
@@ -102,7 +113,7 @@ interface ElectronAPI {
   stageFiles: (timepoints: { label: string; files: string[] }[], studyName: string) => Promise<{ success: boolean; stagingDir?: string; timepointMapping?: any; error?: string }>;
 
   // Load results from a previous run
-  loadResults: (outputDir: string, savePrevious?: { outputDir: string; design: any }) => Promise<void>;
+  loadResults: (outputDir: string, savePrevious?: { outputDir: string; design: any }, cohorts?: { cohortType: string; cohortName: string; outputDir: string }[]) => Promise<void>;
 
   // Public clone analysis
   runPublicCloneAnalysis: (config: {

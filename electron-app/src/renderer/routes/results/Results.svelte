@@ -234,7 +234,7 @@
           <circle cx="8" cy="12" r="3" stroke="currentColor" stroke-width="1.5"/>
           <path d="M6 5l4 6M10 5l-4 6" stroke="currentColor" stroke-width="1.5"/>
         </svg>
-        Public Clones
+        Clones
         {#if $resultsState.publicClonesData}
           <span class="tab-badge">
             {$resultsState.publicClonesData.stats.total_public_clones}

@@ -47,6 +47,8 @@ interface PipelineConfig {
   linkage_method?: 'single' | 'average' | 'complete';
   run_covid_matching?: boolean;
   cov_abdab_database_path?: string;
+  cohort_type?: string;
+  cohort_name?: string;
 }
 
 // Expose API to renderer
@@ -86,8 +88,8 @@ const api = {
   stageFiles: (timepoints: { label: string; files: string[] }[], studyName: string): Promise<{ success: boolean; stagingDir?: string; timepointMapping?: any; error?: string }> =>
     ipcRenderer.invoke('pipeline:stageFiles', timepoints, studyName),
 
-  loadResults: (outputDir: string, savePrevious?: { outputDir: string; design: any }): Promise<{ success: boolean; error?: string }> =>
-    ipcRenderer.invoke('pipeline:loadResults', outputDir, savePrevious),
+  loadResults: (outputDir: string, savePrevious?: { outputDir: string; design: any }, cohorts?: { cohortType: string; cohortName: string; outputDir: string }[]): Promise<{ success: boolean; error?: string }> =>
+    ipcRenderer.invoke('pipeline:loadResults', outputDir, savePrevious, cohorts),
 
   // Public clone analysis
   runPublicCloneAnalysis: (config: {

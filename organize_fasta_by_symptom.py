@@ -15,7 +15,7 @@ from collections import defaultdict
 
 # ──────────────────────── Configuration ────────────────────────
 FASTA_ROOT = Path("/Users/teichmann/Desktop/all fastas long covid study")
-SYMPTOM_EXCEL = Path("/Users/teichmann/Downloads/FullsymptomWithControl-082722.xlsx")
+SYMPTOM_EXCEL = Path("/Users/teichmann/Downloads/FullsymptomWithControl-082722 (1).xlsx")
 OUTPUT_DIR = Path("/Users/teichmann/Desktop/LongCovid_Symptom_FASTA")
 
 TIMEPOINT_MAP = {
@@ -170,6 +170,123 @@ for col in symptom_columns:
             "Patient_IDs": ", ".join(copied_patients) if copied_patients else "",
         })
 
+# ──────────────────────── Step 3b: GI extended cohort (gastrointesti0l OR nausea OR diarrhea) ────────────────────────
+print("\nCreating GI extended cohort (gastrointesti0l OR nausea OR diarrhea)...")
+
+gi_extended = (
+    (symptom_df["gastrointesti0l"] == 1) |
+    (symptom_df["0usea"] == 1) |
+    (symptom_df["diarrhea"] == 1)
+)
+gi_extended_patients = set(symptom_df[gi_extended]["SampleID"].tolist())
+print(f"  Found {len(gi_extended_patients)} patients: {sorted(gi_extended_patients)}")
+
+symptom_patients["_GI_Extended"] = {"patients": gi_extended_patients, "display": "GI_NauseaOrDiarrhea"}
+
+for tp_code, tp_label in TIMEPOINT_MAP.items():
+    folder_name = f"GI_NauseaOrDiarrhea_{tp_label}"
+    folder_path = OUTPUT_DIR / folder_name
+    folder_path.mkdir(parents=True, exist_ok=True)
+
+    copied_patients = []
+    for patient_id in sorted(gi_extended_patients):
+        if patient_id not in patient_timepoint_files:
+            continue
+        if tp_code not in patient_timepoint_files[patient_id]:
+            continue
+
+        fasta_files = sorted(patient_timepoint_files[patient_id][tp_code])
+        output_file = folder_path / f"{patient_id}.fasta"
+        multi_run = len(fasta_files) > 1
+
+        with open(output_file, "w") as out_f:
+            for run_idx, fasta_src in enumerate(fasta_files, start=1):
+                run_prefix = f"run{run_idx}_" if multi_run else ""
+                with open(fasta_src, "r") as in_f:
+                    for line in in_f:
+                        if line.startswith(">") and run_prefix:
+                            out_f.write(f">{run_prefix}{line[1:]}")
+                        else:
+                            out_f.write(line)
+                    if not line.endswith("\n"):
+                        out_f.write("\n")
+
+        copied_patients.append(patient_id)
+
+    n = len(copied_patients)
+    status = f"{n} patients" if n > 0 else "EMPTY (no data)"
+    print(f"  {folder_name:45s} -> {status}")
+
+    summary_rows.append({
+        "Symptom": "GI_NauseaOrDiarrhea",
+        "Symptom_Column": "gastrointesti0l | 0usea | diarrhea",
+        "Timepoint": tp_label,
+        "Timepoint_Code": tp_code,
+        "Folder_Name": folder_name,
+        "Total_Patients_With_Symptom": len(gi_extended_patients),
+        "Patients_With_FASTA": n,
+        "Patient_IDs": ", ".join(copied_patients) if copied_patients else "",
+    })
+
+# ──────────────────────── Step 3c: Non-Long COVID control folders ────────────────────────
+print("\nCreating Non-Long COVID control folders...")
+
+non_lc_mask = (
+    (symptom_df["LongCovid"] == 0) |
+    (symptom_df["long COVID"].astype(str).str.lower().str.contains("delete", na=False)) |
+    (symptom_df["long COVID"].astype(str).str.lower().str.contains("non-long", na=False))
+)
+non_lc_patients = set(symptom_df[non_lc_mask]["SampleID"].tolist())
+print(f"  Found {len(non_lc_patients)} non-Long COVID patients: {sorted(non_lc_patients)}")
+
+# Add as a special "symptom" group
+symptom_patients["_NonLongCovid"] = {"patients": non_lc_patients, "display": "NonLongCovid"}
+
+for tp_code, tp_label in TIMEPOINT_MAP.items():
+    folder_name = f"NonLongCovid_{tp_label}"
+    folder_path = OUTPUT_DIR / folder_name
+    folder_path.mkdir(parents=True, exist_ok=True)
+
+    copied_patients = []
+    for patient_id in sorted(non_lc_patients):
+        if patient_id not in patient_timepoint_files:
+            continue
+        if tp_code not in patient_timepoint_files[patient_id]:
+            continue
+
+        fasta_files = sorted(patient_timepoint_files[patient_id][tp_code])
+        output_file = folder_path / f"{patient_id}.fasta"
+        multi_run = len(fasta_files) > 1
+
+        with open(output_file, "w") as out_f:
+            for run_idx, fasta_src in enumerate(fasta_files, start=1):
+                run_prefix = f"run{run_idx}_" if multi_run else ""
+                with open(fasta_src, "r") as in_f:
+                    for line in in_f:
+                        if line.startswith(">") and run_prefix:
+                            out_f.write(f">{run_prefix}{line[1:]}")
+                        else:
+                            out_f.write(line)
+                    if not line.endswith("\n"):
+                        out_f.write("\n")
+
+        copied_patients.append(patient_id)
+
+    n = len(copied_patients)
+    status = f"{n} patients" if n > 0 else "EMPTY (no data)"
+    print(f"  {folder_name:45s} -> {status}")
+
+    summary_rows.append({
+        "Symptom": "NonLongCovid",
+        "Symptom_Column": "LongCovid==0 / delete",
+        "Timepoint": tp_label,
+        "Timepoint_Code": tp_code,
+        "Folder_Name": folder_name,
+        "Total_Patients_With_Symptom": len(non_lc_patients),
+        "Patients_With_FASTA": n,
+        "Patient_IDs": ", ".join(copied_patients) if copied_patients else "",
+    })
+
 # ──────────────────────── Step 4: Write summary Excel ────────────────────────
 summary_df = pd.DataFrame(summary_rows)
 
@@ -192,24 +309,25 @@ pivot_df = pivot_df.sort_values("Total_Patients_With_Symptom", ascending=False)
 # Sheet 3: Patient × Symptom matrix (with run counts per timepoint)
 patient_symptom_rows = []
 all_patients_in_output = set()
-for col in symptom_columns:
-    info = symptom_patients[col]
+for key, info in symptom_patients.items():
     for pid in info["patients"]:
         if pid in patient_timepoint_files:
             all_patients_in_output.add(pid)
 
 for pid in sorted(all_patients_in_output):
     row = {"Patient_ID": pid}
+    row["Group"] = "NonLongCovid" if pid in non_lc_patients else "LongCovid"
     tp_data = patient_timepoint_files.get(pid, {})
     tps_available = sorted(tp_data.keys())
     row["Available_Timepoints"] = ", ".join(tps_available)
-    # Show run counts per timepoint
     for tp_code, tp_label in TIMEPOINT_MAP.items():
         n_runs = len(tp_data.get(tp_code, []))
         row[f"Runs_{tp_label}_{tp_code}"] = n_runs if n_runs > 0 else ""
     for col in symptom_columns:
         display = symptom_patients[col]["display"]
         row[display] = 1 if pid in symptom_patients[col]["patients"] else 0
+    row["NonLongCovid"] = 1 if pid in non_lc_patients else 0
+    row["GI_NauseaOrDiarrhea"] = 1 if pid in gi_extended_patients else 0
     patient_symptom_rows.append(row)
 
 patient_matrix_df = pd.DataFrame(patient_symptom_rows)
@@ -260,7 +378,7 @@ nonempty_folders = (summary_df["Patients_With_FASTA"] > 0).sum()
 print(f"\n{'=' * 60}")
 print(f"FINAL SUMMARY")
 print(f"{'=' * 60}")
-print(f"  Symptoms:           {len(symptom_columns)}")
+print(f"  Symptoms:           {len(symptom_columns)} + NonLongCovid control")
 print(f"  Total folders:      {total_folders} ({len(symptom_columns)} symptoms × 3 timepoints)")
 print(f"  Non-empty folders:  {nonempty_folders}")
 print(f"  Total FASTA files:  {total_files}")

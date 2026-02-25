@@ -73,11 +73,12 @@
     activeSessionId = session?.id ?? null;
     expanded = false; // Auto-collapse when loading a session
     const outputDirToLoad = outputDir;
+    const hasCohortDirs = session?.cohorts && session.cohorts.length > 0;
     analysisState.update(s => ({
       ...s,
       isRunning: true,
       isSessionLoad: true,
-      pendingLoadOutputDir: outputDirToLoad  // Ignore results for other dirs (stale from previous load)
+      pendingLoadOutputDir: hasCohortDirs ? null : outputDirToLoad
     }));
     currentView.set('results');
     // CRITICAL: Save current session's study design BEFORE clearing - once we clear outputDir,
@@ -98,7 +99,8 @@
       treeImages: [],
       treeMetadata: [],
       outputDir: null,
-      fileIdMapping: {}
+      fileIdMapping: {},
+      cohortResults: []
     }));
     studyDesign.set({ groups: [], unassigned: [] });
 
@@ -108,7 +110,7 @@
     }, 30000);
 
     try {
-      await window.electronAPI.loadResults(outputDirToLoad, savePrevious);
+      await window.electronAPI.loadResults(outputDirToLoad, savePrevious, session?.cohorts);
       analysisState.update(s => ({ ...s, isRunning: false }));
       // If loader didn't find study_design.json, use session's cached design
       if (session?.studyDesign && session.studyDesign.groups?.length > 0) {

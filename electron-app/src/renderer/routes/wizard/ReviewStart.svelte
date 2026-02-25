@@ -11,13 +11,32 @@
   }
   
   function totalFileCount(): number {
+    if ($wizardState.hasControlCohort) {
+      return $wizardState.cohorts.reduce((sum, c) => sum + c.timepoints.reduce((s, tp) => s + tp.fastaFiles.length, 0), 0);
+    }
     return $wizardState.timepoints.reduce((sum, tp) => sum + tp.fastaFiles.length, 0);
+  }
+
+  function buildPipelineConfig(stagingDir: string, cohortType?: string) {
+    return {
+      fasta_dir: stagingDir,
+      clean_fasta: $wizardState.cleanFasta,
+      database_type: $wizardState.databaseType,
+      database_v: $wizardState.customDatabaseV || undefined,
+      database_d: $wizardState.customDatabaseD || undefined,
+      database_j: $wizardState.customDatabaseJ || undefined,
+      clone_mode: $wizardState.cloneMode,
+      linkage_method: $wizardState.linkageMethod,
+      run_covid_matching: $wizardState.runCovidMatching,
+      cov_abdab_database_path: $wizardState.covAbdabPath || undefined,
+      study_name: $wizardState.studyName,
+      cohort_type: cohortType
+    };
   }
   
   async function handleStartAnalysis() {
     if (!window.electronAPI) return;
     
-    // Validate COVID matching configuration
     if ($wizardState.runCovidMatching && !$wizardState.covAbdabPath) {
       alert('Please select a CoV-AbDab database file to enable COVID matching.');
       return;
@@ -25,46 +44,14 @@
     
     stagingError = '';
     resetAnalysis();
-    analysisState.update(s => ({
-      ...s,
-      isRunning: true
-    }));
+    analysisState.update(s => ({ ...s, isRunning: true }));
     
     try {
-      // Stage files from all timepoints into a flat directory
-      const timepointsForStaging = $wizardState.timepoints.map(tp => ({
-        label: tp.label,
-        files: tp.fastaFiles
-      }));
-      
-      const stageResult = await window.electronAPI.stageFiles(timepointsForStaging, $wizardState.studyName);
-      
-      if (!stageResult.success || !stageResult.stagingDir) {
-        stagingError = stageResult.error || 'Failed to stage files';
-        analysisState.update(s => ({
-          ...s,
-          isRunning: false,
-          error: stagingError
-        }));
-        return;
+      if ($wizardState.hasControlCohort && $wizardState.cohorts.length >= 2) {
+        await runMultiCohortAnalysis();
+      } else {
+        await runSingleCohortAnalysis();
       }
-      
-      console.log('[ReviewStart] Files staged to:', stageResult.stagingDir);
-      
-      await window.electronAPI.startPipeline({
-        fasta_dir: stageResult.stagingDir,
-        clean_fasta: $wizardState.cleanFasta,
-        database_type: $wizardState.databaseType,
-        database_v: $wizardState.customDatabaseV || undefined,
-        database_d: $wizardState.customDatabaseD || undefined,
-        database_j: $wizardState.customDatabaseJ || undefined,
-        clone_mode: $wizardState.cloneMode,
-        linkage_method: $wizardState.linkageMethod,
-        run_covid_matching: $wizardState.runCovidMatching,
-        cov_abdab_database_path: $wizardState.covAbdabPath || undefined,
-        study_name: $wizardState.studyName,
-        timepoints: timepointsForStaging
-      });
     } catch (error: any) {
       analysisState.update(s => ({
         ...s,
@@ -72,6 +59,72 @@
         error: error.message || 'An unexpected error occurred'
       }));
     }
+  }
+
+  async function runSingleCohortAnalysis() {
+    const timepointsForStaging = $wizardState.timepoints.map(tp => ({
+      label: tp.label,
+      files: tp.fastaFiles
+    }));
+    
+    const stageResult = await window.electronAPI.stageFiles(timepointsForStaging, $wizardState.studyName);
+    
+    if (!stageResult.success || !stageResult.stagingDir) {
+      stagingError = stageResult.error || 'Failed to stage files';
+      analysisState.update(s => ({ ...s, isRunning: false, error: stagingError }));
+      return;
+    }
+    
+    console.log('[ReviewStart] Files staged to:', stageResult.stagingDir);
+    await window.electronAPI.startPipeline({
+      ...buildPipelineConfig(stageResult.stagingDir),
+      timepoints: timepointsForStaging
+    });
+  }
+
+  async function runMultiCohortAnalysis() {
+    const diseaseCohort = $wizardState.cohorts.find(c => c.type === 'disease');
+    const controlCohort = $wizardState.cohorts.find(c => c.type === 'control');
+
+    if (!diseaseCohort || !controlCohort) {
+      stagingError = 'Both disease and control cohorts must be defined';
+      analysisState.update(s => ({ ...s, isRunning: false, error: stagingError }));
+      return;
+    }
+
+    // Stage and run disease cohort first
+    const diseaseTps = diseaseCohort.timepoints.map(tp => ({ label: tp.label, files: tp.fastaFiles }));
+    const diseaseStage = await window.electronAPI.stageFiles(diseaseTps, `${$wizardState.studyName}_disease`);
+
+    if (!diseaseStage.success || !diseaseStage.stagingDir) {
+      stagingError = diseaseStage.error || 'Failed to stage disease files';
+      analysisState.update(s => ({ ...s, isRunning: false, error: stagingError }));
+      return;
+    }
+
+    console.log('[ReviewStart] Disease files staged to:', diseaseStage.stagingDir);
+    await window.electronAPI.startPipeline({
+      ...buildPipelineConfig(diseaseStage.stagingDir, 'disease'),
+      cohort_name: diseaseCohort.name,
+      timepoints: diseaseTps
+    });
+
+    // Stage and run control cohort
+    const controlTps = controlCohort.timepoints.map(tp => ({ label: tp.label, files: tp.fastaFiles }));
+    const controlStage = await window.electronAPI.stageFiles(controlTps, `${$wizardState.studyName}_control`);
+
+    if (!controlStage.success || !controlStage.stagingDir) {
+      stagingError = controlStage.error || 'Failed to stage control files';
+      analysisState.update(s => ({ ...s, isRunning: false, error: stagingError }));
+      return;
+    }
+
+    console.log('[ReviewStart] Control files staged to:', controlStage.stagingDir);
+    await window.electronAPI.startPipeline({
+      ...buildPipelineConfig(controlStage.stagingDir, 'control'),
+      cohort_name: controlCohort.name,
+      timepoints: controlTps
+    });
   }
   
   async function selectCovidDatabase() {
@@ -136,10 +189,35 @@
           <div class="section-content">
             <h3 class="section-title">Study: {$wizardState.studyName}</h3>
             <div class="section-details">
-              <div class="detail-row">
-                <span class="detail-label">Timepoints</span>
-                <span class="detail-value">{$wizardState.timepoints.length}</span>
-              </div>
+              {#if $wizardState.hasControlCohort}
+                <div class="detail-row">
+                  <span class="detail-label">Cohorts</span>
+                  <span class="detail-value">{$wizardState.cohorts.length} (Disease + Control)</span>
+                </div>
+                {#each $wizardState.cohorts as cohort}
+                  <div class="detail-row">
+                    <span class="detail-label tp-indent">{cohort.name} ({cohort.type})</span>
+                    <span class="detail-value">{cohort.timepoints.length} timepoint{cohort.timepoints.length !== 1 ? 's' : ''}</span>
+                  </div>
+                  {#each cohort.timepoints as tp}
+                    <div class="detail-row">
+                      <span class="detail-label" style="padding-left: 2rem; font-style: italic;">{tp.label}</span>
+                      <span class="detail-value">{tp.fastaFiles.length} file{tp.fastaFiles.length !== 1 ? 's' : ''}</span>
+                    </div>
+                  {/each}
+                {/each}
+              {:else}
+                <div class="detail-row">
+                  <span class="detail-label">Timepoints</span>
+                  <span class="detail-value">{$wizardState.timepoints.length}</span>
+                </div>
+                {#each $wizardState.timepoints as tp}
+                  <div class="detail-row">
+                    <span class="detail-label tp-indent">{tp.label}</span>
+                    <span class="detail-value">{tp.fastaFiles.length} file{tp.fastaFiles.length !== 1 ? 's' : ''}</span>
+                  </div>
+                {/each}
+              {/if}
               <div class="detail-row">
                 <span class="detail-label">Total Files</span>
                 <span class="detail-value">{totalFileCount()} FASTA file{totalFileCount() !== 1 ? 's' : ''}</span>
@@ -148,12 +226,6 @@
                 <span class="detail-label">Clean Files</span>
                 <span class="detail-value">{$wizardState.cleanFasta ? 'Yes' : 'No'}</span>
               </div>
-              {#each $wizardState.timepoints as tp}
-                <div class="detail-row">
-                  <span class="detail-label tp-indent">{tp.label}</span>
-                  <span class="detail-value">{tp.fastaFiles.length} file{tp.fastaFiles.length !== 1 ? 's' : ''}</span>
-                </div>
-              {/each}
             </div>
           </div>
           <button class="edit-btn" on:click={() => wizardState.update(s => ({...s, step: 1}))}>

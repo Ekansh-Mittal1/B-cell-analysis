@@ -20,10 +20,22 @@ export interface WizardTimepoint {
   fastaFiles: string[];
 }
 
+export type CohortType = 'disease' | 'control';
+
+export interface WizardCohort {
+  id: string;
+  name: string;
+  type: CohortType;
+  timepoints: WizardTimepoint[];
+}
+
 export interface WizardState {
   step: WizardStep;
   studyName: string;
   timepoints: WizardTimepoint[];
+  /** When a control cohort is added, both cohorts are stored here */
+  cohorts: WizardCohort[];
+  hasControlCohort: boolean;
   cleanFasta: boolean;
   databaseType: 'IMGT' | 'Custom';
   customDatabaseV: string | null;
@@ -195,6 +207,20 @@ export interface TimepointMapping {
   [stagedFilename: string]: { timepoint: string; originalFile: string };
 }
 
+export interface CohortResults {
+  cohortType: CohortType;
+  cohortName: string;
+  sequences: SequenceData[];
+  fileGroups: FileGroup[];
+  treeImages: string[];
+  treeMetadata: TreeMetadata[];
+  timepointMapping: TimepointMapping;
+  outputDir: string;
+  fileIdMapping: Record<string, string>;
+  covidMatchData: CovidMatchData | null;
+  studyDesign?: StudyDesign;
+}
+
 export interface ResultsState {
   sequences: SequenceData[];
   fileGroups: FileGroup[];
@@ -213,6 +239,8 @@ export interface ResultsState {
   isAnalyzingPublicClones: boolean;
   covidMatchData: CovidMatchData | null;
   isAnalyzingCovidMatching: boolean;
+  /** Per-cohort results when control cohort is present */
+  cohortResults: CohortResults[];
 }
 
 export interface AnalysisState {
@@ -229,6 +257,12 @@ export interface AnalysisState {
 // Session History
 // ============================================
 
+export interface SessionCohortEntry {
+  cohortType: CohortType;
+  cohortName: string;
+  outputDir: string;
+}
+
 export interface SessionEntry {
   id: string;
   name: string;
@@ -238,6 +272,7 @@ export interface SessionEntry {
   fastaDir: string;
   studyName?: string;
   studyDesign?: StudyDesign;
+  cohorts?: SessionCohortEntry[];
 }
 
 const SESSIONS_KEY = 'bcr_sessions';
@@ -404,6 +439,8 @@ export const wizardState: Writable<WizardState> = writable({
   step: 1,
   studyName: '',
   timepoints: [],
+  cohorts: [],
+  hasControlCohort: false,
   cleanFasta: false,
   databaseType: 'IMGT',
   customDatabaseV: null,
@@ -442,7 +479,8 @@ export const resultsState: Writable<ResultsState> = writable({
   publicClonesData: null,
   isAnalyzingPublicClones: false,
   covidMatchData: null,
-  isAnalyzingCovidMatching: false
+  isAnalyzingCovidMatching: false,
+  cohortResults: []
 });
 
 
@@ -454,7 +492,14 @@ export const resultsState: Writable<ResultsState> = writable({
 // Step 1: must have study name and at least 1 timepoint with files
 export const canProceedStep1: Readable<boolean> = derived(
   wizardState,
-  ($state) => $state.studyName.trim().length > 0 && $state.timepoints.length > 0 && $state.timepoints.every(tp => tp.fastaFiles.length > 0)
+  ($state) => {
+    if ($state.studyName.trim().length === 0) return false;
+    if ($state.hasControlCohort) {
+      return $state.cohorts.length >= 2 &&
+        $state.cohorts.every(c => c.timepoints.length > 0 && c.timepoints.every(tp => tp.fastaFiles.length > 0));
+    }
+    return $state.timepoints.length > 0 && $state.timepoints.every(tp => tp.fastaFiles.length > 0);
+  }
 );
 
 export const canProceedStep2: Readable<boolean> = derived(
@@ -474,7 +519,13 @@ export const selectedSequence: Readable<SequenceData | null> = derived(
   resultsState,
   ($state) => {
     if (!$state.selectedSequenceId) return null;
-    return $state.sequences.find(s => s.id === $state.selectedSequenceId) || null;
+    const found = $state.sequences.find(s => s.id === $state.selectedSequenceId);
+    if (found) return found;
+    for (const cohort of $state.cohortResults) {
+      const cohortFound = cohort.sequences.find(s => s.id === $state.selectedSequenceId);
+      if (cohortFound) return cohortFound;
+    }
+    return null;
   }
 );
 
@@ -590,6 +641,8 @@ export function resetWizard(): void {
     step: 1,
     studyName: '',
     timepoints: [],
+    cohorts: [],
+    hasControlCohort: false,
     cleanFasta: false,
     databaseType: 'IMGT',
     customDatabaseV: null,
@@ -736,7 +789,15 @@ export function toggleFileGroup(filename: string): void {
       group.filename === filename
         ? { ...group, expanded: !group.expanded }
         : group
-    )
+    ),
+    cohortResults: state.cohortResults.map(cohort => ({
+      ...cohort,
+      fileGroups: cohort.fileGroups.map(group =>
+        group.filename === filename
+          ? { ...group, expanded: !group.expanded }
+          : group
+      )
+    }))
   }));
 }
 
@@ -766,25 +827,28 @@ export function toggleDlFileGroup(filename: string): void {
 }
 
 export function toggleCloneGroup(filename: string, cloneId: number | null): void {
-  resultsState.update(state => ({
-    ...state,
-    fileGroups: state.fileGroups.map(fileGroup => {
+  const toggleClones = (fileGroups: FileGroup[]) =>
+    fileGroups.map(fileGroup => {
       if (fileGroup.filename === filename) {
         return {
           ...fileGroup,
-          cloneGroups: fileGroup.cloneGroups.map(cloneGroup => {
-            if (cloneGroup.cloneId === cloneId) {
-              return {
-                ...cloneGroup,
-                expanded: !cloneGroup.expanded
-              };
-            }
-            return cloneGroup;
-          })
+          cloneGroups: fileGroup.cloneGroups.map(cloneGroup =>
+            cloneGroup.cloneId === cloneId
+              ? { ...cloneGroup, expanded: !cloneGroup.expanded }
+              : cloneGroup
+          )
         };
       }
       return fileGroup;
-    })
+    });
+
+  resultsState.update(state => ({
+    ...state,
+    fileGroups: toggleClones(state.fileGroups),
+    cohortResults: state.cohortResults.map(cohort => ({
+      ...cohort,
+      fileGroups: toggleClones(cohort.fileGroups)
+    }))
   }));
 }
 

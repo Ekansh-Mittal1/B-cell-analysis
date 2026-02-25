@@ -448,49 +448,30 @@
 
 <div class="interactive-tree-wrapper">
   <div class="tree-controls">
-    <div class="control-group">
-      <span class="control-hint">
-        🖱️ Use mouse wheel to zoom • Drag to pan
-      </span>
-      
-      <button class="btn btn-secondary btn-sm" on:click={resetZoom} title="Reset View (Reload Tree)">
-        <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-          <path d="M8 2a6 6 0 1 0 4.2 10.2M12 2v4h-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-        </svg>
-        Reset View
-      </button>
-      
-      <div class="export-group">
-        <button class="btn btn-primary btn-sm" on:click={exportTreeAsPNG} title="Export tree as PNG image" disabled={!display}>
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-            <path d="M8 1v8M8 9l-3-3M8 9l3-3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-            <path d="M2 11v3a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1v-3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-          </svg>
-          Export PNG
-        </button>
-        
-        <button class="btn btn-secondary btn-sm" on:click={exportTreeAsSVG} title="Export tree as SVG (vector)" disabled={!display}>
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-            <path d="M8 1v8M8 9l-3-3M8 9l3-3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-            <path d="M2 11v3a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1v-3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-          </svg>
-          Export SVG
-        </button>
-      </div>
-    </div>
-    
-    <div class="info-panel">
-      <div class="info-item">
-        <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-          <circle cx="7" cy="7" r="6" stroke="currentColor" stroke-width="1.5"/>
-          <path d="M7 5v4M7 3.5v0" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-        </svg>
-        <span class="info-text">
-          <strong>{treeName}</strong> • {cloneSize} sequences • 
-          🖱️ Drag to pan • Scroll to zoom
-        </span>
-      </div>
-    </div>
+    <span class="control-hint">Drag to pan • Scroll to zoom</span>
+
+    <button class="btn btn-secondary btn-xs" on:click={resetZoom} title="Reset View">
+      <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
+        <path d="M8 2a6 6 0 1 0 4.2 10.2M12 2v4h-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      Reset
+    </button>
+
+    <button class="btn btn-primary btn-xs" on:click={exportTreeAsPNG} title="Export PNG" disabled={!display}>
+      <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
+        <path d="M8 1v8M8 9l-3-3M8 9l3-3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M2 11v3a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1v-3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+      </svg>
+      PNG
+    </button>
+
+    <button class="btn btn-secondary btn-xs" on:click={exportTreeAsSVG} title="Export SVG" disabled={!display}>
+      <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
+        <path d="M8 1v8M8 9l-3-3M8 9l3-3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M2 11v3a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1v-3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+      </svg>
+      SVG
+    </button>
   </div>
   
   {#if isLoading}
@@ -527,55 +508,30 @@
   }
   
   .tree-controls {
-    padding: var(--space-3);
+    padding: 3px var(--space-2);
     border-bottom: 1px solid var(--gray-200);
     display: flex;
-    justify-content: space-between;
     align-items: center;
-    gap: var(--space-3);
+    gap: var(--space-2);
     flex-shrink: 0;
     background: var(--gray-50);
   }
-  
-  .control-group {
-    display: flex;
-    align-items: center;
-    gap: var(--space-3);
-  }
-  
+
   .control-hint {
-    font-size: 13px;
-    color: var(--gray-600);
-    font-weight: 500;
-    padding: var(--space-2) var(--space-3);
-    background: var(--gray-100);
-    border-radius: var(--radius-md);
+    font-size: 10px;
+    color: var(--gray-500);
     white-space: nowrap;
+    margin-right: auto;
   }
-  
-  .export-group {
-    display: flex;
-    gap: var(--space-2);
-    margin-left: auto;
-  }
-  
-  .info-panel {
-    flex: 1;
-    display: flex;
+
+  .btn-xs {
+    font-size: 11px;
+    padding: 2px 6px;
+    display: inline-flex;
     align-items: center;
-    justify-content: flex-end;
-  }
-  
-  .info-item {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    color: var(--gray-700);
-  }
-  
-  .info-text {
-    font-size: 12px;
-    line-height: 1.4;
+    gap: 3px;
+    border-radius: var(--border-radius-sm);
+    line-height: 1.3;
   }
   
   .tree-container {

@@ -42,7 +42,7 @@
           </svg>
         </div>
         <div class="brand-text">
-          <span class="brand-name">BCR Analysis</span>
+          <span class="brand-name">Clono</span>
           <span class="brand-version">v1.0.0</span>
         </div>
       </div>

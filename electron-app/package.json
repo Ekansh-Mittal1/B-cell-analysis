@@ -39,7 +39,7 @@
   },
   "build": {
     "appId": "com.bcr-analysis.app",
-    "productName": "B-Cell Repertoire Analysis",
+    "productName": "Clono",
     "directories": {
       "output": "release"
     },

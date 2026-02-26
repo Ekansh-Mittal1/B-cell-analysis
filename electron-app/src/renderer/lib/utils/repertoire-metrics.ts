@@ -271,7 +271,7 @@ export function computeVGeneFrequencies(seqs: SequenceData[]): VGeneFamilyFreq[]
 // ---------------------------------------------------------------------------
 
 /** Map c_call (e.g. IGHM*01) to Ig class (IgM, IgG, etc.) */
-function cCallToIgClass(cCall: string | null | undefined): string | null {
+export function cCallToIgClass(cCall: string | null | undefined): string | null {
   if (!cCall || typeof cCall !== 'string') return null;
   const upper = cCall.toUpperCase();
   if (upper.startsWith('IGHM')) return 'IgM';

@@ -8,9 +8,9 @@ from Bio import SeqIO
 import os
 
 
-def blast_get_top_hits_v(input_fp, db_V_fp, db_J_fp, db_D_fp, organism='human', bin_dir=None, data_dir=None, output_dir=None):
+def blast_get_top_hits_v(input_fp, db_V_fp, db_J_fp, db_D_fp, organism='human', bin_dir=None, data_dir=None, output_dir=None, db_C_fp=None):
     """
-    Function that parses the hits table from blastp (bin/igblast(p/n)) into pandas dataframe. The hits table shows the top 3 hits (default) of the germline seuqences that are with highest identity % to the query seuqence.
+    Function that parses the hits table from igblastn into pandas dataframe.
     :param input_fp: string, file path of the input fasta file
     :param db_V_fp: string, file path of the V gene database
     :param db_J_fp: string, file path of the J gene database
@@ -19,6 +19,7 @@ def blast_get_top_hits_v(input_fp, db_V_fp, db_J_fp, db_D_fp, organism='human', 
     :param bin_dir: string, optional, path to bin directory (if None, will calculate)
     :param data_dir: string, optional, path to data directory (if None, will calculate)
     :param output_dir: string, optional, path to output directory (if None, will calculate)
+    :param db_C_fp: string, optional, path to C gene BLAST database (for IgBLAST >= 1.18)
     :return: a tuple of (df, output data)
     """
     # Calculate paths if not provided
@@ -46,8 +47,8 @@ def blast_get_top_hits_v(input_fp, db_V_fp, db_J_fp, db_D_fp, organism='human', 
     env = os.environ.copy()
     env['IGDATA'] = igdata_path
     cmd = [igblastn_path, '-germline_db_V', db_V_fp, '-germline_db_D', db_D_fp, '-germline_db_J', db_J_fp]
-    # Note: -c_region_db requires IgBLAST >= 1.17.  C gene assignment is
-    # handled separately via blastn in pipeline_runner.assign_c_genes().
+    if db_C_fp:
+        cmd.extend(['-c_region_db', db_C_fp])
     cmd.extend(['-query', input_fp, '-outfmt', '7 std qseq sseq btop', '-auxiliary_data', aux_data_path])
     a = subprocess.Popen(cmd, stdout=subprocess.PIPE, cwd=geneHome, env=env)
     out = a.communicate()[0].decode('utf-8')

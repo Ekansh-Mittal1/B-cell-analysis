@@ -36,13 +36,19 @@
     const svg = d3.select(container).select('svg');
     svg.selectAll('*').remove();
 
-    const metricKeys = ['Shannon', 'Simpson', 'Chao1', 'Gini', 'Mean SHM', 'D50'] as const;
-    const numCharts = metricKeys.length;
-    const margin = { top: 24, right: 16, bottom: 60, left: 42 };
-    const height = 280;
+    const rows: (readonly string[])[] = [
+      ['Shannon', 'Simpson', 'Chao1'],
+      ['Gini', 'Mean SHM', 'D50']
+    ];
+    const cols = 3;
+    const margin = { top: 24, right: 16, bottom: 36, left: 42 };
+    const rowHeight = 220;
+    const rowGap = 32;
+    const legendHeight = 28;
+    const totalHeight = rows.length * rowHeight + (rows.length - 1) * rowGap + legendHeight;
     const totalInnerW = w - margin.left - margin.right;
-    const chartW = totalInnerW / numCharts;
-    const innerH = height - margin.top - margin.bottom;
+    const chartW = totalInnerW / cols;
+    const innerH = rowHeight - margin.top - margin.bottom;
 
     type BarDatum = { metric: string; label: string; value: number; color: string };
     const bars: BarDatum[] = [];
@@ -57,78 +63,77 @@
     }
     const labels = [...new Set(bars.map(b => b.label))];
 
-    svg.attr('width', w).attr('height', height);
+    svg.attr('width', w).attr('height', totalHeight);
 
-    for (let i = 0; i < numCharts; i++) {
-      const metric = metricKeys[i];
-      const metricBars = bars.filter(b => b.metric === metric);
-      const x0 = chartW * i;
+    for (let rowIdx = 0; rowIdx < rows.length; rowIdx++) {
+      const rowMetrics = rows[rowIdx];
+      const rowY = rowIdx * (rowHeight + rowGap);
 
-      // Per-metric Y scale
-      const yMax = d3.max(metricBars, (b: any) => b.value) || 1;
-      const y = d3.scaleLinear().domain([0, yMax * 1.1]).nice().range([innerH, 0]);
+      for (let colIdx = 0; colIdx < rowMetrics.length; colIdx++) {
+        const metric = rowMetrics[colIdx];
+        const metricBars = bars.filter(b => b.metric === metric);
+        const x0 = chartW * colIdx;
 
-      const colG = svg.append('g')
-        .attr('transform', `translate(${margin.left + x0},${margin.top})`);
+        const yMax = d3.max(metricBars, (b: any) => b.value) || 1;
+        const y = d3.scaleLinear().domain([0, yMax * 1.1]).nice().range([innerH, 0]);
 
-      const x1 = d3.scaleBand()
-        .domain(labels)
-        .range([0, chartW - 4])
-        .padding(0.08);
+        const colG = svg.append('g')
+          .attr('transform', `translate(${margin.left + x0},${rowY + margin.top})`);
 
-      // Y axis (left of each sub-chart)
-      colG.append('g')
-        .call(d3.axisLeft(y).ticks(5))
-        .selectAll('text')
-        .style('font-size', '10px');
+        const x1 = d3.scaleBand()
+          .domain(labels)
+          .range([0, chartW - 4])
+          .padding(0.08);
 
-      // Grid lines (for this sub-chart only)
-      colG.append('g')
-        .attr('class', 'grid')
-        .call(d3.axisLeft(y).ticks(5).tickSize(-(chartW - 4)).tickFormat(() => ''))
-        .selectAll('line')
-        .style('stroke', '#E8EAED')
-        .style('stroke-dasharray', '3,3');
-      colG.selectAll('.grid .domain').remove();
+        colG.append('g')
+          .call(d3.axisLeft(y).ticks(5))
+          .selectAll('text')
+          .style('font-size', '10px');
 
-      // Bars
-      colG.selectAll('rect')
-        .data(metricBars)
-        .join('rect')
-        .attr('x', (d: any) => x1(d.label) || 0)
-        .attr('y', (d: any) => y(d.value))
-        .attr('width', x1.bandwidth())
-        .attr('height', (d: any) => innerH - y(d.value))
-        .attr('rx', 3)
-        .attr('fill', (d: any) => d.color)
-        .attr('opacity', 0.85)
-        .on('mouseenter', function(this: any, event: any, d: any) {
-          d3.select(this).attr('opacity', 1);
-          showTooltip(event, d);
-        })
-        .on('mouseleave', function(this: any) {
-          d3.select(this).attr('opacity', 0.85);
-          hideTooltip();
-        });
+        colG.append('g')
+          .attr('class', 'grid')
+          .call(d3.axisLeft(y).ticks(5).tickSize(-(chartW - 4)).tickFormat(() => ''))
+          .selectAll('line')
+          .style('stroke', '#E8EAED')
+          .style('stroke-dasharray', '3,3');
+        colG.selectAll('.grid .domain').remove();
 
-      // Metric label (below bars) with tooltip
-      const labelG = colG.append('g')
-        .attr('cursor', 'help')
-        .attr('transform', `translate(${(chartW - 4) / 2}, ${innerH + 20})`);
-      labelG.append('title').text(METRIC_TOOLTIPS[metric] || metric);
-      labelG.append('text')
-        .attr('x', 0)
-        .attr('y', 0)
-        .attr('text-anchor', 'middle')
-        .attr('dominant-baseline', 'middle')
-        .style('font-size', '12px')
-        .style('font-weight', '600')
-        .text(metric);
+        colG.selectAll('rect')
+          .data(metricBars)
+          .join('rect')
+          .attr('x', (d: any) => x1(d.label) || 0)
+          .attr('y', (d: any) => y(d.value))
+          .attr('width', x1.bandwidth())
+          .attr('height', (d: any) => innerH - y(d.value))
+          .attr('rx', 3)
+          .attr('fill', (d: any) => d.color)
+          .attr('opacity', 0.85)
+          .on('mouseenter', function(this: any, event: any, d: any) {
+            d3.select(this).attr('opacity', 1);
+            showTooltip(event, d);
+          })
+          .on('mouseleave', function(this: any) {
+            d3.select(this).attr('opacity', 0.85);
+            hideTooltip();
+          });
+
+        const labelG = colG.append('g')
+          .attr('cursor', 'help')
+          .attr('transform', `translate(${(chartW - 4) / 2}, ${innerH + 20})`);
+        labelG.append('title').text(METRIC_TOOLTIPS[metric] || metric);
+        labelG.append('text')
+          .attr('x', 0)
+          .attr('y', 0)
+          .attr('text-anchor', 'middle')
+          .attr('dominant-baseline', 'middle')
+          .style('font-size', '12px')
+          .style('font-weight', '600')
+          .text(metric);
+      }
     }
 
-    // Legend
     const legend = svg.append('g')
-      .attr('transform', `translate(${margin.left}, ${height - 16})`);
+      .attr('transform', `translate(${margin.left}, ${totalHeight - 10})`);
     labels.forEach((label, i) => {
       const color = bars.find(b => b.label === label)?.color || '#999';
       const lg = legend.append('g')
@@ -146,7 +151,13 @@
 
   function showTooltip(event: MouseEvent, d: { metric: string; label: string; value: number }) {
     tooltipText = `${d.label}\n${d.metric}: ${d.value.toFixed(3)}`;
-    tooltipStyle = `left:${event.offsetX + 12}px;top:${event.offsetY - 10}px`;
+    const containerW = container?.offsetWidth ?? 0;
+    const tipW = 160;
+    const x = event.offsetX;
+    let left = x + 12;
+    if (left + tipW > containerW) left = x - tipW - 12;
+    if (left < 0) left = 4;
+    tooltipStyle = `left:${left}px;top:${event.offsetY - 10}px`;
     tooltipVisible = true;
   }
   function hideTooltip() { tooltipVisible = false; }
@@ -167,7 +178,8 @@
   .chart-wrapper {
     position: relative;
     width: 100%;
-    min-height: 280px;
+    min-height: 500px;
+    overflow: visible;
   }
   .tooltip {
     position: absolute;

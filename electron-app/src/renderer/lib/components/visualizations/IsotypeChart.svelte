@@ -46,14 +46,12 @@
 
     const count = metrics.length;
 
-    // Layout: fit pies in a responsive grid
-    const cols = count <= 1 ? 1 : count <= 4 ? 2 : 3;
-    const rows = Math.ceil(count / cols);
+    const cols = count;
     const cellW = w / cols;
     const pieRadius = Math.min(cellW * 0.35, 80);
-    const cellH = pieRadius * 2 + 56; // room for two-line label
+    const cellH = pieRadius * 2 + 56;
     const legendH = 28;
-    const totalH = rows * cellH + legendH;
+    const totalH = cellH + legendH;
 
     svg.attr('width', w).attr('height', totalH);
 
@@ -66,10 +64,8 @@
       .sort(null);
 
     metrics.forEach((m, idx) => {
-      const col = idx % cols;
-      const row = Math.floor(idx / cols);
-      const cx = col * cellW + cellW / 2;
-      const cy = row * cellH + pieRadius + 4;
+      const cx = idx * cellW + cellW / 2;
+      const cy = pieRadius + 4;
 
       const slices = m.isotypeFreqs.filter(f => f.frequency > 0);
       if (slices.length === 0) return;
@@ -135,7 +131,13 @@
 
   function showTooltip(event: MouseEvent, text: string) {
     tooltipText = text;
-    tooltipStyle = `left:${event.offsetX + 12}px;top:${event.offsetY - 10}px`;
+    const containerW = container?.offsetWidth ?? 0;
+    const tipW = 180;
+    const x = event.offsetX;
+    let left = x + 12;
+    if (left + tipW > containerW) left = x - tipW - 12;
+    if (left < 0) left = 4;
+    tooltipStyle = `left:${left}px;top:${event.offsetY - 10}px`;
     tooltipVisible = true;
   }
   function hideTooltip() { tooltipVisible = false; }
@@ -161,7 +163,8 @@
   .chart-wrapper {
     position: relative;
     width: 100%;
-    min-height: 240px;
+    min-height: 180px;
+    overflow: visible;
   }
   .no-data {
     display: flex;

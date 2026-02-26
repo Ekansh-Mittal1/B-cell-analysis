@@ -57,12 +57,44 @@ export function setupIpcHandlers(
       const dirPath = result.filePaths[0];
       const isFasta = (f: string) => !f.startsWith('.') && (f.endsWith('.fasta') || f.endsWith('.fa'));
       const isDir = (p: string) => { try { return fs.statSync(p).isDirectory(); } catch { return false; } };
-      
-      // 1. Check for FASTA files directly in the selected directory
+
+      // Helper: detect 10x filtered file pairs in a directory.
+      // Returns matched pairs of *_filtered.fasta + *_filtered_annotations.csv.
+      function detect10xPairs(dir: string): { fasta: string; annotations: string; prefix: string }[] {
+        const entries = fs.readdirSync(dir).filter(f => !f.startsWith('.'));
+        const pairs: { fasta: string; annotations: string; prefix: string }[] = [];
+        for (const f of entries) {
+          if (!f.endsWith('_filtered.fasta')) continue;
+          const prefix = f.replace(/_filtered\.fasta$/, '');
+          const csvName = `${prefix}_filtered_annotations.csv`;
+          if (entries.includes(csvName)) {
+            pairs.push({ fasta: f, annotations: csvName, prefix });
+          }
+        }
+        return pairs;
+      }
+
+      // 1. Check for 10x filtered file pairs in selected directory
+      const tenxPairs = detect10xPairs(dirPath);
+      if (tenxPairs.length > 0) {
+        console.log(`[IPC] Detected ${tenxPairs.length} 10x filtered sample pairs in ${dirPath}`);
+        return {
+          path: dirPath,
+          mode: '10x',
+          fileCount: tenxPairs.length,
+          files: tenxPairs.map(p => p.fasta),
+          annotationFiles: tenxPairs.map(p => p.annotations),
+          filePairs: tenxPairs.map(p => ({
+            fasta: path.join(dirPath, p.fasta),
+            annotations: path.join(dirPath, p.annotations)
+          }))
+        };
+      }
+
+      // 2. Check for plain FASTA files directly in the selected directory
       const topFiles = fs.readdirSync(dirPath).filter(isFasta);
       
       if (topFiles.length > 0) {
-        // Flat structure — FASTA files directly in directory (no timepoint subfolders)
         return {
           path: dirPath,
           fileCount: topFiles.length,
@@ -70,7 +102,7 @@ export function setupIpcHandlers(
         };
       }
       
-      // 2. No FASTA files at top level — scan subdirectories as timepoints
+      // 3. No files at top level — scan subdirectories as timepoints
       const topEntries = fs.readdirSync(dirPath)
         .filter(e => !e.startsWith('.') && isDir(path.join(dirPath, e)))
         .sort();
@@ -79,7 +111,6 @@ export function setupIpcHandlers(
         return { path: dirPath, fileCount: 0, files: [] };
       }
       
-      // Each subdirectory with FASTA files becomes a timepoint
       interface DetectedTP { label: string; dir: string; files: string[]; }
       const detectedTimepoints: DetectedTP[] = [];
       let totalFiles = 0;
@@ -194,7 +225,7 @@ export function setupIpcHandlers(
 
   // Stage timepoint files into a flat directory for the pipeline.
   // Called right before pipeline:start. Returns the staging dir path.
-  ipcMain.handle('pipeline:stageFiles', async (_event, timepoints: { label: string; files: string[] }[], studyName: string) => {
+  ipcMain.handle('pipeline:stageFiles', async (_event, timepoints: { label: string; files: string[]; annotationFiles?: string[] }[], studyName: string) => {
     try {
       const baseOuts = path.join(paths.backendDir, '..', 'geneGUI', 'outs');
       if (!fs.existsSync(baseOuts)) fs.mkdirSync(baseOuts, { recursive: true });
@@ -204,17 +235,16 @@ export function setupIpcHandlers(
       const stagingDir = path.join(baseOuts, `staging_${timestamp}_${uniqueId}`);
       fs.mkdirSync(stagingDir, { recursive: true });
 
-      const timepointMapping: Record<string, { timepoint: string; originalFile: string }> = {};
+      const timepointMapping: Record<string, { timepoint: string; originalFile: string; annotationFile?: string }> = {};
       const usedNames = new Set<string>();
 
       for (const tp of timepoints) {
-        for (const filePath of tp.files) {
+        for (let fi = 0; fi < tp.files.length; fi++) {
+          const filePath = tp.files[fi];
           const originalName = path.basename(filePath);
           
-          // Always prefix with timepoint label for consistency
           let destName = `${tp.label}_${originalName}`;
           
-          // Handle collision if same filename appears multiple times in same timepoint
           let counter = 2;
           while (usedNames.has(destName)) {
             destName = `${tp.label}_${counter}_${originalName}`;
@@ -225,10 +255,21 @@ export function setupIpcHandlers(
           const destFile = path.join(stagingDir, destName);
           if (fs.existsSync(filePath)) {
             fs.copyFileSync(filePath, destFile);
-            timepointMapping[destName] = {
+            const mappingEntry: { timepoint: string; originalFile: string; annotationFile?: string } = {
               timepoint: tp.label,
               originalFile: originalName
             };
+
+            // Copy paired annotation CSV if present
+            const annPath = tp.annotationFiles?.[fi];
+            if (annPath && fs.existsSync(annPath)) {
+              const annOrigName = path.basename(annPath);
+              const annDestName = `${tp.label}_${annOrigName}`;
+              fs.copyFileSync(annPath, path.join(stagingDir, annDestName));
+              mappingEntry.annotationFile = annDestName;
+            }
+
+            timepointMapping[destName] = mappingEntry;
           }
         }
       }

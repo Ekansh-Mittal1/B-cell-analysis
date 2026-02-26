@@ -44,6 +44,19 @@
 
   // ── Folder selection (per timepoint) ──
 
+  function extractFilesFromResult(result: any): { fastaFiles: string[]; annotationFiles: string[] } {
+    if (result.mode === '10x' && result.filePairs?.length > 0) {
+      return {
+        fastaFiles: result.filePairs.map((p: any) => p.fasta),
+        annotationFiles: result.filePairs.map((p: any) => p.annotations)
+      };
+    }
+    const fastaFiles = result.files.length > 0
+      ? result.files.map((f: string) => result.path + '/' + f)
+      : (result.detectedTimepoints || []).flatMap((tp: any) => tp.files.map((f: string) => tp.dir + '/' + f));
+    return { fastaFiles, annotationFiles: [] };
+  }
+
   async function handleSelectTimepointFolder(tpIndex: number) {
     if (!window.electronAPI) return;
     isLoading = true;
@@ -51,13 +64,11 @@
       const result = await window.electronAPI.selectDirectory();
       if (!result) return;
 
-      const files = result.files.length > 0
-        ? result.files.map((f: string) => result.path + '/' + f)
-        : (result.detectedTimepoints || []).flatMap((tp: any) => tp.files.map((f: string) => tp.dir + '/' + f));
+      const { fastaFiles, annotationFiles } = extractFilesFromResult(result);
 
       wizardState.update(s => {
         const tps = [...s.timepoints];
-        tps[tpIndex] = { ...tps[tpIndex], fastaDir: result.path, fastaFiles: files };
+        tps[tpIndex] = { ...tps[tpIndex], fastaDir: result.path, fastaFiles, annotationFiles };
         return { ...s, timepoints: tps };
       });
     } catch (error) {
@@ -74,15 +85,13 @@
       const result = await window.electronAPI.selectDirectory();
       if (!result) return;
 
-      const files = result.files.length > 0
-        ? result.files.map((f: string) => result.path + '/' + f)
-        : (result.detectedTimepoints || []).flatMap((tp: any) => tp.files.map((f: string) => tp.dir + '/' + f));
+      const { fastaFiles, annotationFiles } = extractFilesFromResult(result);
 
       wizardState.update(s => {
         const cohorts = s.cohorts.map(c => {
           if (c.type !== cohortType) return c;
           const tps = [...c.timepoints];
-          tps[tpIndex] = { ...tps[tpIndex], fastaDir: result.path, fastaFiles: files };
+          tps[tpIndex] = { ...tps[tpIndex], fastaDir: result.path, fastaFiles, annotationFiles };
           return { ...c, timepoints: tps };
         });
         return { ...s, cohorts };
@@ -99,7 +108,7 @@
   function addEmptyTimepoint() {
     wizardState.update(s => ({
       ...s,
-      timepoints: [...s.timepoints, { id: genId(), label: `T${s.timepoints.length + 1}`, fastaDir: null, fastaFiles: [] }]
+      timepoints: [...s.timepoints, { id: genId(), label: `T${s.timepoints.length + 1}`, fastaDir: null, fastaFiles: [], annotationFiles: [] }]
     }));
   }
 
@@ -121,7 +130,7 @@
     wizardState.update(s => {
       const cohorts = s.cohorts.map(c => {
         if (c.type !== cohortType) return c;
-        return { ...c, timepoints: [...c.timepoints, { id: genId(), label: `T${c.timepoints.length + 1}`, fastaDir: null, fastaFiles: [] }] };
+        return { ...c, timepoints: [...c.timepoints, { id: genId(), label: `T${c.timepoints.length + 1}`, fastaDir: null, fastaFiles: [], annotationFiles: [] }] };
       });
       return { ...s, cohorts };
     });
@@ -233,7 +242,11 @@
                     on:input={(e) => updateTimepointLabel(i, e.currentTarget.value)} placeholder="Timepoint name" />
                   <div class="tp-actions">
                     {#if tp.fastaFiles.length > 0}
-                      <span class="tp-badge">{tp.fastaFiles.length} file{tp.fastaFiles.length !== 1 ? 's' : ''}</span>
+                      <span class="tp-badge">
+                        {tp.fastaFiles.length}
+                        {tp.annotationFiles.length > 0 ? 'sample' : 'file'}{tp.fastaFiles.length !== 1 ? 's' : ''}
+                        {#if tp.annotationFiles.length > 0}<span class="tp-badge-10x">10x</span>{/if}
+                      </span>
                     {/if}
                     <button class="btn btn-ghost btn-sm" on:click={() => handleSelectTimepointFolder(i)} disabled={isLoading}>
                       {tp.fastaDir ? 'Change' : 'Select'} Folder
@@ -305,7 +318,11 @@
                           on:input={(e) => updateTimepointLabelForCohort(ct, i, e.currentTarget.value)} placeholder="Timepoint name" />
                         <div class="tp-actions">
                           {#if tp.fastaFiles.length > 0}
-                            <span class="tp-badge">{tp.fastaFiles.length} file{tp.fastaFiles.length !== 1 ? 's' : ''}</span>
+                            <span class="tp-badge">
+                              {tp.fastaFiles.length}
+                              {tp.annotationFiles.length > 0 ? 'sample' : 'file'}{tp.fastaFiles.length !== 1 ? 's' : ''}
+                              {#if tp.annotationFiles.length > 0}<span class="tp-badge-10x">10x</span>{/if}
+                            </span>
                           {/if}
                           <button class="btn btn-ghost btn-sm" on:click={() => handleSelectTimepointFolderForCohort(ct, i)} disabled={isLoading}>
                             {tp.fastaDir ? 'Change' : 'Select'} Folder
@@ -476,7 +493,8 @@
 
   .tp-actions { display: flex; align-items: center; gap: var(--space-2); flex-shrink: 0; }
 
-  .tp-badge { font-size: var(--text-xs); color: var(--color-success); font-weight: var(--font-medium); white-space: nowrap; }
+  .tp-badge { font-size: var(--text-xs); color: var(--color-success); font-weight: var(--font-medium); white-space: nowrap; display: inline-flex; align-items: center; gap: 4px; }
+  .tp-badge-10x { font-size: 9px; background: var(--color-primary); color: #fff; border-radius: 3px; padding: 1px 4px; font-weight: 600; letter-spacing: 0.3px; }
   .btn-danger { color: var(--color-error) !important; }
   .btn-danger:hover { background: rgba(239, 68, 68, 0.08) !important; }
 

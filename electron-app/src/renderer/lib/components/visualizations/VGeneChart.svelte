@@ -45,7 +45,7 @@
 
     const labels = metrics.map(m => `${m.groupName} / ${m.timepointLabel}`);
 
-    const margin = { top: 20, right: 20, bottom: 30, left: 80 };
+    const margin = { top: 20, right: 20, bottom: 44, left: 80 };
     const barGroupHeight = Math.max(18, Math.min(28, 200 / sortedFamilies.length));
     const rowHeight = barGroupHeight * labels.length + 8;
     const height = margin.top + margin.bottom + sortedFamilies.length * rowHeight;
@@ -122,7 +122,7 @@
 
     // Legend
     const legend = svg.append('g')
-      .attr('transform', `translate(${margin.left + 8}, ${height - 8})`);
+      .attr('transform', `translate(${margin.left + 8}, ${height - 18})`);
     labels.forEach((label, i) => {
       const color = metrics[i]?.groupColor || '#999';
       const lg = legend.append('g')
@@ -140,7 +140,13 @@
 
   function showTooltip(event: MouseEvent, label: string, family: string, freq: number) {
     tooltipText = `${label}\n${family}: ${(freq * 100).toFixed(1)}%`;
-    tooltipStyle = `left:${event.offsetX + 12}px;top:${event.offsetY - 10}px`;
+    const containerW = container?.offsetWidth ?? 0;
+    const tipW = 180;
+    const x = event.offsetX;
+    let left = x + 12;
+    if (left + tipW > containerW) left = x - tipW - 12;
+    if (left < 0) left = 4;
+    tooltipStyle = `left:${left}px;top:${event.offsetY - 10}px`;
     tooltipVisible = true;
   }
   function hideTooltip() { tooltipVisible = false; }
@@ -161,7 +167,8 @@
   .chart-wrapper {
     position: relative;
     width: 100%;
-    min-height: 280px;
+    min-height: 200px;
+    overflow: visible;
   }
   .tooltip {
     position: absolute;

@@ -110,7 +110,7 @@ interface ElectronAPI {
   startPipeline: (config: PipelineConfig) => Promise<{ success: boolean; error?: string }>;
   sendThresholdResponse: (value: number | Record<string, number>) => Promise<void>;
   cancelPipeline: () => Promise<void>;
-  stageFiles: (timepoints: { label: string; files: string[] }[], studyName: string) => Promise<{ success: boolean; stagingDir?: string; timepointMapping?: any; error?: string }>;
+  stageFiles: (timepoints: { label: string; files: string[]; annotationFiles?: string[] }[], studyName: string) => Promise<{ success: boolean; stagingDir?: string; timepointMapping?: any; error?: string }>;
 
   // Load results from a previous run
   loadResults: (outputDir: string, savePrevious?: { outputDir: string; design: any }, cohorts?: { cohortType: string; cohortName: string; outputDir: string }[]) => Promise<void>;

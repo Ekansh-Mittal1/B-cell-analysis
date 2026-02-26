@@ -18,18 +18,35 @@ import type {
   VisualizationData
 } from '../stores/app';
 
+import { cCallToIgClass } from './repertoire-metrics';
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Strip timepoint prefix from filename to get the patient identifier. */
+/** Resolve filename to a unique patient identifier, deduplicating across timepoints. */
 function getPatientName(filename: string, timepointMapping: TimepointMapping): string {
   const entry = timepointMapping[filename];
-  if (entry?.originalFile) {
-    return entry.originalFile;
+  let name = entry?.originalFile ?? filename;
+
+  if (!entry?.originalFile) {
+    const m = name.match(/^T\d+_(.+)$/);
+    if (m) name = m[1];
   }
-  const m = filename.match(/^T\d+_(.+)$/);
-  return m ? m[1] : filename;
+
+  // Strip timepoint suffix from the base name so the same patient
+  // across timepoints resolves to a single ID.
+  // e.g. "INCOV002_T1.fasta" with timepoint "T1" → "INCOV002.fasta"
+  if (entry?.timepoint) {
+    const tp = entry.timepoint;
+    const ext = name.match(/(\.[^.]+)$/)?.[1] ?? '';
+    const base = ext ? name.slice(0, -ext.length) : name;
+    if (base.endsWith(`_${tp}`)) {
+      name = base.slice(0, -(tp.length + 1)) + ext;
+    }
+  }
+
+  return name;
 }
 
 /** Get the timepoint label for a file. */
@@ -292,6 +309,8 @@ export interface ClonalDynamicsEntry {
 
 export interface ClonalDynamicsData {
   entries: ClonalDynamicsEntry[];
+  /** All ranked entries (not limited to topN), for bubble chart per-timepoint mode */
+  allEntries: ClonalDynamicsEntry[];
   timepointLabels: string[];
   /** Total sequences per timepoint (for display in header) */
   timepointTotals: { label: string; total: number }[];
@@ -321,7 +340,7 @@ export function computeClonalDynamicsHeatmap(
   const emptyTotals = tpLabels.map(l => ({ label: l, total: 0 }));
 
   if (tpLabels.length < 2) {
-    return { entries: [], timepointLabels: tpLabels, timepointTotals: emptyTotals, stats: { persistent: 0, expanding: 0, contracting: 0, disappeared: 0, lateEmerging: 0, total: 0 } };
+    return { entries: [], allEntries: [], timepointLabels: tpLabels, timepointTotals: emptyTotals, stats: { persistent: 0, expanding: 0, contracting: 0, disappeared: 0, lateEmerging: 0, total: 0 } };
   }
 
   // Compute total sequences per timepoint (for normalization)
@@ -430,8 +449,9 @@ export function computeClonalDynamicsHeatmap(
     });
   }
 
-  // Sort by total sequence count (largest clones first)
+  // Sort by total sequence count (largest clones first) and assign ranked labels
   allEntries.sort((a, b) => b.totalRawCount - a.totalRawCount);
+  allEntries.forEach((e, i) => { e.cloneLabel = `C${i + 1}`; });
 
   const topEntries = allEntries.slice(0, topN);
 
@@ -444,7 +464,7 @@ export function computeClonalDynamicsHeatmap(
     total: allEntries.length
   };
 
-  return { entries: topEntries, timepointLabels: tpLabels, timepointTotals, stats };
+  return { entries: topEntries, allEntries, timepointLabels: tpLabels, timepointTotals, stats };
 }
 
 // ---------------------------------------------------------------------------
@@ -532,4 +552,184 @@ function buildVisualizationData(
   }
 
   return viz;
+}
+
+// ---------------------------------------------------------------------------
+// Public/Private clone classification for bubble chart coloring
+// ---------------------------------------------------------------------------
+
+/**
+ * Identify clone IDs that are "public" (appear in >=2 patient files within
+ * any timepoint). Returns a Set of clone_ids.
+ */
+export function getPublicCloneIds(
+  fileGroups: FileGroup[],
+  timepointMapping: TimepointMapping
+): Set<number> {
+  const tpFiles = new Map<string, string[]>();
+  for (const [filename, entry] of Object.entries(timepointMapping)) {
+    const tp = entry.timepoint;
+    if (!tpFiles.has(tp)) tpFiles.set(tp, []);
+    tpFiles.get(tp)!.push(filename);
+  }
+
+  const publicIds = new Set<number>();
+  const fgMap = new Map<string, FileGroup>();
+  for (const fg of fileGroups) fgMap.set(fg.filename, fg);
+
+  for (const [, files] of tpFiles) {
+    if (files.length < 2) continue;
+    const cloneToFiles = new Map<number, Set<string>>();
+    for (const filename of files) {
+      const fg = fgMap.get(filename);
+      if (!fg) continue;
+      for (const seq of fg.sequences) {
+        if (seq.clone_id == null) continue;
+        if (!cloneToFiles.has(seq.clone_id)) cloneToFiles.set(seq.clone_id, new Set());
+        cloneToFiles.get(seq.clone_id)!.add(filename);
+      }
+    }
+    for (const [cloneId, fset] of cloneToFiles) {
+      if (fset.size >= 2) publicIds.add(cloneId);
+    }
+  }
+
+  return publicIds;
+}
+
+// ---------------------------------------------------------------------------
+// Section 3: Isotype Tile Data (per clone × timepoint)
+// ---------------------------------------------------------------------------
+
+export const ISOTYPE_COLORS: Record<string, string> = {
+  IgM: '#4e79a7',
+  IgD: '#76b7b2',
+  IgG: '#e15759',
+  IgA: '#f28e2b',
+  IgE: '#b07aa1',
+  Mixed: '#bab0ac'
+};
+
+export const ISOTYPE_ORDER = ['IgM', 'IgD', 'IgG', 'IgA', 'IgE'];
+
+export interface IsotypeTileEntry {
+  cloneLabel: string;
+  cloneId: number;
+  lineageId?: number;
+  cdr3Aa: string;
+  vGene: string;
+  jGene: string;
+  totalRawCount: number;
+  status: ClonalStatus;
+  meanSHM: number;
+  patientCount: number;
+  tiles: IsotypeTile[];
+}
+
+export interface IsotypeTile {
+  timepointLabel: string;
+  dominantIsotype: string | null;
+  seqCount: number;
+  isotypeBreakdown: Record<string, number>;
+  meanSHM: number;
+}
+
+/**
+ * Compute isotype tile data for clonal dynamics entries.
+ * For each clone × timepoint, determines the dominant isotype by examining
+ * sequences within that clone's timepoint bucket.
+ */
+export function computeIsotypePerCloneTimepoint(
+  entries: ClonalDynamicsEntry[],
+  fileGroups: FileGroup[],
+  timepointMapping: TimepointMapping,
+  timepointLabels: string[]
+): IsotypeTileEntry[] {
+  const fgMap = new Map<string, FileGroup>();
+  for (const fg of fileGroups) fgMap.set(fg.filename, fg);
+
+  // Build lookup: trackId → timepoint → sequences
+  const trackSeqsByTp = new Map<number, Map<string, SequenceData[]>>();
+
+  const hasLineageIds = fileGroups.some(fg => fg.sequences.some(s => s.lineage_id != null));
+
+  for (const fg of fileGroups) {
+    const tp = timepointMapping[fg.filename]?.timepoint;
+    if (!tp) continue;
+    for (const seq of fg.sequences) {
+      if (seq.clone_id == null) continue;
+      const trackId = (hasLineageIds && seq.lineage_id != null) ? seq.lineage_id : seq.clone_id;
+      if (!trackSeqsByTp.has(trackId)) trackSeqsByTp.set(trackId, new Map());
+      const tpMap = trackSeqsByTp.get(trackId)!;
+      if (!tpMap.has(tp)) tpMap.set(tp, []);
+      tpMap.get(tp)!.push(seq);
+    }
+  }
+
+  // Count unique patients per trackId
+  const trackPatients = new Map<number, Set<string>>();
+  for (const fg of fileGroups) {
+    const patient = getPatientName(fg.filename, timepointMapping);
+    for (const seq of fg.sequences) {
+      if (seq.clone_id == null) continue;
+      const trackId = (hasLineageIds && seq.lineage_id != null) ? seq.lineage_id : seq.clone_id;
+      if (!trackPatients.has(trackId)) trackPatients.set(trackId, new Set());
+      trackPatients.get(trackId)!.add(patient);
+    }
+  }
+
+  return entries.map(entry => {
+    const trackId = (hasLineageIds && entry.lineageId != null) ? entry.lineageId : entry.cloneId;
+    const tpMap = trackSeqsByTp.get(trackId);
+
+    const allShmValues: number[] = [];
+    const tiles: IsotypeTile[] = timepointLabels.map(label => {
+      const seqs = tpMap?.get(label) ?? [];
+      const breakdown: Record<string, number> = {};
+      let shmSum = 0;
+      let shmCount = 0;
+
+      for (const s of seqs) {
+        const ig = cCallToIgClass(s.c_call);
+        if (ig) breakdown[ig] = (breakdown[ig] ?? 0) + 1;
+        if (s.somatic_mutations != null) {
+          shmSum += s.somatic_mutations;
+          shmCount++;
+          allShmValues.push(s.somatic_mutations);
+        }
+      }
+
+      let dominantIsotype: string | null = null;
+      let maxCount = 0;
+      for (const [iso, cnt] of Object.entries(breakdown)) {
+        if (cnt > maxCount) { maxCount = cnt; dominantIsotype = iso; }
+      }
+
+      return {
+        timepointLabel: label,
+        dominantIsotype: seqs.length === 0 ? null : dominantIsotype,
+        seqCount: seqs.length,
+        isotypeBreakdown: breakdown,
+        meanSHM: shmCount > 0 ? shmSum / shmCount : 0
+      };
+    });
+
+    const overallMeanSHM = allShmValues.length > 0
+      ? allShmValues.reduce((a, b) => a + b, 0) / allShmValues.length
+      : 0;
+
+    return {
+      cloneLabel: entry.cloneLabel,
+      cloneId: entry.cloneId,
+      lineageId: entry.lineageId,
+      cdr3Aa: entry.cdr3Aa,
+      vGene: entry.vGene,
+      jGene: entry.jGene,
+      totalRawCount: entry.totalRawCount,
+      status: entry.status,
+      meanSHM: overallMeanSHM,
+      patientCount: trackPatients.get(trackId)?.size ?? 1,
+      tiles
+    };
+  });
 }

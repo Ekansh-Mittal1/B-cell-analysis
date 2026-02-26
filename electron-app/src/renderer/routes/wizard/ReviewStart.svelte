@@ -64,7 +64,8 @@
   async function runSingleCohortAnalysis() {
     const timepointsForStaging = $wizardState.timepoints.map(tp => ({
       label: tp.label,
-      files: tp.fastaFiles
+      files: tp.fastaFiles,
+      annotationFiles: tp.annotationFiles
     }));
     
     const stageResult = await window.electronAPI.stageFiles(timepointsForStaging, $wizardState.studyName);
@@ -93,7 +94,7 @@
     }
 
     // Stage and run disease cohort first
-    const diseaseTps = diseaseCohort.timepoints.map(tp => ({ label: tp.label, files: tp.fastaFiles }));
+    const diseaseTps = diseaseCohort.timepoints.map(tp => ({ label: tp.label, files: tp.fastaFiles, annotationFiles: tp.annotationFiles }));
     const diseaseStage = await window.electronAPI.stageFiles(diseaseTps, `${$wizardState.studyName}_disease`);
 
     if (!diseaseStage.success || !diseaseStage.stagingDir) {
@@ -110,7 +111,7 @@
     });
 
     // Stage and run control cohort
-    const controlTps = controlCohort.timepoints.map(tp => ({ label: tp.label, files: tp.fastaFiles }));
+    const controlTps = controlCohort.timepoints.map(tp => ({ label: tp.label, files: tp.fastaFiles, annotationFiles: tp.annotationFiles }));
     const controlStage = await window.electronAPI.stageFiles(controlTps, `${$wizardState.studyName}_control`);
 
     if (!controlStage.success || !controlStage.stagingDir) {

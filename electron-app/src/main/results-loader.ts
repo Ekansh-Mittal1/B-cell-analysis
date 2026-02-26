@@ -190,6 +190,46 @@ export function loadResultsFromDisk(
       }
     }
 
+    // 4b. Supplement clone_id + c_call from the merged clone-pass file.
+    // CreateGermlines drops most heavy chain sequences (D-gene alignment issue),
+    // but clone-pass retains them with clone_id. This is critical for isotype data.
+    const mergedClonePassPath = path.join(absOutputDir, 'ig_out_data_db-pass_clone-pass.tsv');
+    if (fs.existsSync(mergedClonePassPath)) {
+      const cpContent = fs.readFileSync(mergedClonePassPath, 'utf-8');
+      const { rows: cpRows } = parseTsv(cpContent);
+      const cpCloneCounts: Record<number, number> = {};
+      for (const row of cpRows) {
+        const cid = row['clone_id'] ? parseInt(row['clone_id'], 10) : NaN;
+        if (!isNaN(cid)) cpCloneCounts[cid] = (cpCloneCounts[cid] ?? 0) + 1;
+      }
+      for (const row of cpRows) {
+        const seqId = row['sequence_id'] ?? '';
+        if (!seqId) continue;
+        const cCall = row['c_call']?.trim() || null;
+        const cloneId = row['clone_id'] ? parseInt(row['clone_id'], 10) : null;
+        const validCloneId = cloneId != null && !isNaN(cloneId) ? cloneId : null;
+        if (cloneData[seqId]) {
+          if (!cloneData[seqId].c_call && cCall) cloneData[seqId].c_call = cCall;
+          if (cloneData[seqId].clone_id == null && validCloneId != null) {
+            cloneData[seqId].clone_id = validCloneId;
+            cloneData[seqId].clone_count = cpCloneCounts[validCloneId] ?? 0;
+            cloneData[seqId].productive = true;
+          }
+          if (!cloneData[seqId].cdr3_dna && row['junction']) cloneData[seqId].cdr3_dna = row['junction'];
+          if (!cloneData[seqId].cdr3_peptide && row['junction_aa']) cloneData[seqId].cdr3_peptide = row['junction_aa'];
+        } else if (cCall || validCloneId != null) {
+          cloneData[seqId] = {
+            clone_id: validCloneId,
+            clone_count: validCloneId != null ? (cpCloneCounts[validCloneId] ?? 0) : 0,
+            productive: true,
+            cdr3_dna: row['junction'] || null,
+            cdr3_peptide: row['junction_aa'] || null,
+            ...(cCall ? { c_call: cCall } : {}),
+          };
+        }
+      }
+    }
+
     // 5. Load fail file if present
     const failPath = path.join(absOutputDir, 'ig_out_data_db-fail.tsv');
     if (fs.existsSync(failPath)) {

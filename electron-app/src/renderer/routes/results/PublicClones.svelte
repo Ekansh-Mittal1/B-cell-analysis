@@ -5,12 +5,17 @@
     computePublicClonesPerTimepoint,
     computePublicClones,
     computeClonalDynamicsHeatmap,
-    getTimepointLabels
+    getTimepointLabels,
+    getPublicCloneIds
   } from '../../lib/utils/public-clones';
   import type { ClonalDynamicsData, ClonalDynamicsEntry, ClonalStatus } from '../../lib/utils/public-clones';
   import type { TreeMetadata } from '../../lib/stores/app';
   import HeatmapViz from '../../lib/components/visualizations/HeatmapViz.svelte';
   import ClonalDynamicsHeatmap from '../../lib/components/visualizations/ClonalDynamicsHeatmap.svelte';
+  import ClonalDynamicsBubbles from '../../lib/components/visualizations/ClonalDynamicsBubbles.svelte';
+  import ClonalDynamicsIsotypeTiles from '../../lib/components/visualizations/ClonalDynamicsIsotypeTiles.svelte';
+  import { computeIsotypePerCloneTimepoint } from '../../lib/utils/public-clones';
+  import type { IsotypeTileEntry } from '../../lib/utils/public-clones';
   import InteractiveTree from './InteractiveTree.svelte';
 
   const DYNAMICS_STATUSES: { value: ClonalStatus; label: string }[] = [
@@ -40,6 +45,41 @@
   let activeStatuses: Record<ClonalStatus, boolean> = {
     persistent: true, expanding: true, contracting: true, disappeared: true, late_emerging: true, transient: true
   };
+
+  // ── View mode state ──
+  let dynamicsViewMode: 'heatmap' | 'bubbles' | 'isotype' = 'heatmap';
+  let bubbleColorMode: 'identity' | 'public_private' = 'identity';
+  let bubbleRankingMode: 'overall' | 'per_timepoint' = 'overall';
+
+  $: diseasePublicCloneIds = diseaseCohort
+    ? getPublicCloneIds(diseaseCohort.fileGroups, diseaseCohort.timepointMapping)
+    : new Set<number>();
+  $: controlPublicCloneIds = controlCohort
+    ? getPublicCloneIds(controlCohort.fileGroups, controlCohort.timepointMapping)
+    : new Set<number>();
+  $: singlePublicCloneIds = (!hasCohorts && activeFileGroups.length > 0)
+    ? getPublicCloneIds(activeFileGroups, activeTimepointMapping)
+    : new Set<number>();
+
+  // ── Isotype tile data ──
+  $: diseaseIsotypeTiles = (diseaseDynamicsData && diseaseCohort)
+    ? computeIsotypePerCloneTimepoint(
+        diseaseDynamicsData.entries.filter(e => activeStatuses[e.status]),
+        diseaseCohort.fileGroups, diseaseCohort.timepointMapping, diseaseDynamicsData.timepointLabels
+      )
+    : [];
+  $: controlIsotypeTiles = (controlDynamicsData && controlCohort)
+    ? computeIsotypePerCloneTimepoint(
+        controlDynamicsData.entries.filter(e => activeStatuses[e.status]),
+        controlCohort.fileGroups, controlCohort.timepointMapping, controlDynamicsData.timepointLabels
+      )
+    : [];
+  $: singleIsotypeTiles = (dynamicsData && !hasCohorts)
+    ? computeIsotypePerCloneTimepoint(
+        filteredDynamicsEntries,
+        activeFileGroups, activeTimepointMapping, dynamicsData.timepointLabels
+      )
+    : [];
 
   function toggleStatusFilter(status: ClonalStatus) {
     activeStatuses = { ...activeStatuses, [status]: !activeStatuses[status] };
@@ -546,6 +586,23 @@
                       </button>
                     {/each}
                   </div>
+                  {#if dynamicsViewMode === 'bubbles'}
+                    <label class="bubble-control-label">
+                      Color:
+                      <select bind:value={bubbleColorMode}>
+                        <option value="identity">Clone Identity</option>
+                        <option value="public_private">Public / Private</option>
+                      </select>
+                    </label>
+                    <label class="bubble-control-label">
+                      Rank:
+                      <select bind:value={bubbleRankingMode}>
+                        <option value="overall">Top N overall</option>
+                        <option value="per_timepoint">Top N per timepoint</option>
+                      </select>
+                    </label>
+                  {/if}
+
                   <label class="topn-label">
                     Show top
                     <select bind:value={dynamicsTopN} on:change={handleDynamicsTopNChange}>
@@ -558,6 +615,36 @@
                     </select>
                     clones
                   </label>
+
+                  <div class="dynamics-view-toggle">
+                    <button
+                      type="button"
+                      class="view-toggle-btn"
+                      class:active={dynamicsViewMode === 'heatmap'}
+                      on:click={() => dynamicsViewMode = 'heatmap'}
+                    >
+                      <svg width="12" height="12" viewBox="0 0 16 16" fill="none"><rect x="1" y="1" width="6" height="6" rx="1" stroke="currentColor" stroke-width="1.5"/><rect x="9" y="1" width="6" height="6" rx="1" stroke="currentColor" stroke-width="1.5"/><rect x="1" y="9" width="6" height="6" rx="1" stroke="currentColor" stroke-width="1.5"/><rect x="9" y="9" width="6" height="6" rx="1" stroke="currentColor" stroke-width="1.5"/></svg>
+                      Heatmap
+                    </button>
+                    <button
+                      type="button"
+                      class="view-toggle-btn"
+                      class:active={dynamicsViewMode === 'bubbles'}
+                      on:click={() => dynamicsViewMode = 'bubbles'}
+                    >
+                      <svg width="12" height="12" viewBox="0 0 16 16" fill="none"><circle cx="6" cy="6" r="5" stroke="currentColor" stroke-width="1.5"/><circle cx="12" cy="11" r="3" stroke="currentColor" stroke-width="1.5"/><circle cx="3" cy="13" r="2" stroke="currentColor" stroke-width="1.5"/></svg>
+                      Bubbles
+                    </button>
+                    <button
+                      type="button"
+                      class="view-toggle-btn"
+                      class:active={dynamicsViewMode === 'isotype'}
+                      on:click={() => dynamicsViewMode = 'isotype'}
+                    >
+                      <svg width="12" height="12" viewBox="0 0 16 16" fill="none"><rect x="1" y="1" width="14" height="4" rx="1" stroke="currentColor" stroke-width="1.3"/><rect x="1" y="7" width="14" height="4" rx="1" stroke="currentColor" stroke-width="1.3"/><rect x="1" y="11" width="8" height="4" rx="1" stroke="currentColor" stroke-width="1.3" fill="currentColor" fill-opacity="0.15"/></svg>
+                      Isotype
+                    </button>
+                  </div>
                 </div>
 
                 <!-- Stats (only shown when no cohorts; cohort stats are inline with heatmaps below) -->
@@ -574,7 +661,7 @@
                 {#if hasCohorts && diseaseDynamicsData && controlDynamicsData}
                   <!-- 2-column layout: side-by-side heatmaps (left) | detail + tree (right) -->
                   <div class="dynamics-cohort-split">
-                    <!-- Left: side-by-side heatmaps with inline stats -->
+                    <!-- Left: side-by-side heatmaps/bubbles with inline stats -->
                     <div class="dynamics-cohort-heatmaps">
                       <div class="dynamics-cohort-hm">
                         <div class="dynamics-dual-label cohort-label-disease">{diseaseCohort?.cohortName || 'Disease'}</div>
@@ -585,14 +672,37 @@
                           <div class="dstat-inline disappeared"><span class="dstat-val">{diseaseDynamicsData.stats.disappeared}</span><span class="dstat-label">Disapp.</span></div>
                           <div class="dstat-inline late-emerging"><span class="dstat-val">{diseaseDynamicsData.stats.lateEmerging}</span><span class="dstat-label">Late</span></div>
                         </div>
-                        <div style="max-height: calc(100vh - 420px); overflow-y: auto; overflow-x: auto; border: 1px solid var(--border-light); border-radius: 8px;">
-                          <ClonalDynamicsHeatmap
-                            entries={diseaseDynamicsData.entries.filter(e => activeStatuses[e.status])}
-                            timepointLabels={diseaseDynamicsData.timepointLabels}
-                            timepointTotals={diseaseDynamicsData.timepointTotals}
-                            onCloneClick={handleDiseaseCloneClick}
-                          />
-                        </div>
+                        {#if dynamicsViewMode === 'heatmap'}
+                          <div style="max-height: calc(100vh - 420px); overflow-y: auto; overflow-x: auto; border: 1px solid var(--border-light); border-radius: 8px;">
+                            <ClonalDynamicsHeatmap
+                              entries={diseaseDynamicsData.entries.filter(e => activeStatuses[e.status])}
+                              timepointLabels={diseaseDynamicsData.timepointLabels}
+                              timepointTotals={diseaseDynamicsData.timepointTotals}
+                              onCloneClick={handleDiseaseCloneClick}
+                            />
+                          </div>
+                        {:else if dynamicsViewMode === 'bubbles'}
+                          <div style="max-height: calc(100vh - 420px); overflow-y: auto; border: 1px solid var(--border-light); border-radius: 8px; padding: 8px;">
+                            <ClonalDynamicsBubbles
+                              entries={diseaseDynamicsData.entries.filter(e => activeStatuses[e.status])}
+                              timepointLabels={diseaseDynamicsData.timepointLabels}
+                              timepointTotals={diseaseDynamicsData.timepointTotals}
+                              onCloneClick={handleDiseaseCloneClick}
+                              colorMode={bubbleColorMode}
+                              rankingMode={bubbleRankingMode}
+                              publicCloneIds={diseasePublicCloneIds}
+                            />
+                          </div>
+                        {:else}
+                          <div style="max-height: calc(100vh - 420px); overflow-y: auto; overflow-x: auto; border: 1px solid var(--border-light); border-radius: 8px; padding: 8px;">
+                            <ClonalDynamicsIsotypeTiles
+                              tileEntries={diseaseIsotypeTiles}
+                              timepointLabels={diseaseDynamicsData.timepointLabels}
+                              onCloneClick={handleDiseaseCloneClick}
+                              dynamicsEntries={diseaseDynamicsData.entries.filter(e => activeStatuses[e.status])}
+                            />
+                          </div>
+                        {/if}
                       </div>
                       <div class="dynamics-cohort-hm">
                         <div class="dynamics-dual-label cohort-label-control">{controlCohort?.cohortName || 'Control'}</div>
@@ -603,18 +713,42 @@
                           <div class="dstat-inline disappeared"><span class="dstat-val">{controlDynamicsData.stats.disappeared}</span><span class="dstat-label">Disapp.</span></div>
                           <div class="dstat-inline late-emerging"><span class="dstat-val">{controlDynamicsData.stats.lateEmerging}</span><span class="dstat-label">Late</span></div>
                         </div>
-                        <div style="max-height: calc(100vh - 420px); overflow-y: auto; overflow-x: auto; border: 1px solid var(--border-light); border-radius: 8px;">
-                          <ClonalDynamicsHeatmap
-                            entries={controlDynamicsData.entries.filter(e => activeStatuses[e.status])}
-                            timepointLabels={controlDynamicsData.timepointLabels}
-                            timepointTotals={controlDynamicsData.timepointTotals}
-                            onCloneClick={handleControlCloneClick}
-                          />
-                        </div>
+                        {#if dynamicsViewMode === 'heatmap'}
+                          <div style="max-height: calc(100vh - 420px); overflow-y: auto; overflow-x: auto; border: 1px solid var(--border-light); border-radius: 8px;">
+                            <ClonalDynamicsHeatmap
+                              entries={controlDynamicsData.entries.filter(e => activeStatuses[e.status])}
+                              timepointLabels={controlDynamicsData.timepointLabels}
+                              timepointTotals={controlDynamicsData.timepointTotals}
+                              onCloneClick={handleControlCloneClick}
+                            />
+                          </div>
+                        {:else if dynamicsViewMode === 'bubbles'}
+                          <div style="max-height: calc(100vh - 420px); overflow-y: auto; border: 1px solid var(--border-light); border-radius: 8px; padding: 8px;">
+                            <ClonalDynamicsBubbles
+                              entries={controlDynamicsData.entries.filter(e => activeStatuses[e.status])}
+                              timepointLabels={controlDynamicsData.timepointLabels}
+                              timepointTotals={controlDynamicsData.timepointTotals}
+                              onCloneClick={handleControlCloneClick}
+                              colorMode={bubbleColorMode}
+                              rankingMode={bubbleRankingMode}
+                              publicCloneIds={controlPublicCloneIds}
+                            />
+                          </div>
+                        {:else}
+                          <div style="max-height: calc(100vh - 420px); overflow-y: auto; overflow-x: auto; border: 1px solid var(--border-light); border-radius: 8px; padding: 8px;">
+                            <ClonalDynamicsIsotypeTiles
+                              tileEntries={controlIsotypeTiles}
+                              timepointLabels={controlDynamicsData.timepointLabels}
+                              onCloneClick={handleControlCloneClick}
+                              dynamicsEntries={controlDynamicsData.entries.filter(e => activeStatuses[e.status])}
+                            />
+                          </div>
+                        {/if}
                       </div>
                     </div>
 
-                    <!-- Right: detail bar + tree -->
+                    <!-- Right: detail bar + tree (heatmap mode only) -->
+                    {#if dynamicsViewMode === 'heatmap'}
                     <div class="dynamics-cohort-right">
                       {#if selectedDynamicsEntry}
                         <div class="dynamics-detail-strip">
@@ -637,7 +771,83 @@
                         </div>
                       {/if}
 
-                      <div class="dynamics-cohort-tree">
+                        <div class="dynamics-cohort-tree">
+                          {#if selectedDynamicsEntry}
+                            {#if selectedDynamicsTree}
+                              <div class="dynamics-tree-section">
+                                <div class="dynamics-tree-header">
+                                  <svg width="10" height="10" viewBox="0 0 16 16" fill="none">
+                                    <path d="M8 2v4M8 6H4v4M8 6h4v4M4 10v4M12 10v4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                                  </svg>
+                                  <span class="dynamics-tree-title">Phylogenetic Tree</span>
+                                  <span class="dynamics-tree-label">{getTreeLabel(selectedDynamicsTree.meta)}</span>
+                                </div>
+                                <div class="dynamics-tree-container">
+                                  <InteractiveTree
+                                    newickPath={getTreeNewickPath(selectedDynamicsTree.meta.path)}
+                                    treeName={getTreeLabel(selectedDynamicsTree.meta)}
+                                    cloneSize={selectedDynamicsTree.meta.clone_size || 0}
+                                  />
+                                </div>
+                              </div>
+                            {:else}
+                              <div class="dynamics-tree-empty-full">
+                                <svg width="32" height="32" viewBox="0 0 16 16" fill="none">
+                                  <path d="M8 2v4M8 6H4v4M8 6h4v4M4 10v4M12 10v4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                                </svg>
+                                <span>No phylogenetic tree available{selectedDynamicsTimepoint ? ` for ${selectedDynamicsTimepoint}` : ''}</span>
+                                <span class="dynamics-tree-hint">Trees are built for the top 20 clones per timepoint. Click a timepoint cell to look up trees.</span>
+                              </div>
+                            {/if}
+                          {:else}
+                            <div class="dynamics-tree-empty-full">
+                              <svg width="32" height="32" viewBox="0 0 16 16" fill="none">
+                                <path d="M8 2v4M8 6H4v4M8 6h4v4M4 10v4M12 10v4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                              </svg>
+                              <span>Select a clone to view its phylogenetic tree</span>
+                            </div>
+                          {/if}
+                        </div>
+                    </div>
+                    {/if}
+                  </div>
+                {:else}
+                  <!-- Original 3-column layout: Heatmap/Bubbles/Isotype | Tree | Detail -->
+                  <div class="dynamics-split">
+                    <div class="dynamics-heatmap-section">
+                      {#if dynamicsViewMode === 'heatmap'}
+                        <ClonalDynamicsHeatmap
+                          entries={filteredDynamicsEntries}
+                          timepointLabels={dynamicsData.timepointLabels}
+                          timepointTotals={dynamicsData.timepointTotals}
+                          onCloneClick={handleDynamicsCloneClick}
+                        />
+                      {:else if dynamicsViewMode === 'bubbles'}
+                        <div style="padding: 8px;">
+                          <ClonalDynamicsBubbles
+                            entries={filteredDynamicsEntries}
+                            timepointLabels={dynamicsData.timepointLabels}
+                            timepointTotals={dynamicsData.timepointTotals}
+                            onCloneClick={handleDynamicsCloneClick}
+                            colorMode={bubbleColorMode}
+                            rankingMode={bubbleRankingMode}
+                            publicCloneIds={singlePublicCloneIds}
+                          />
+                        </div>
+                      {:else}
+                        <div style="padding: 8px;">
+                          <ClonalDynamicsIsotypeTiles
+                            tileEntries={singleIsotypeTiles}
+                            timepointLabels={dynamicsData.timepointLabels}
+                            onCloneClick={handleDynamicsCloneClick}
+                            dynamicsEntries={filteredDynamicsEntries}
+                          />
+                        </div>
+                      {/if}
+                    </div>
+
+                    {#if dynamicsViewMode === 'heatmap'}
+                      <div class="dynamics-tree-panel">
                         {#if selectedDynamicsEntry}
                           {#if selectedDynamicsTree}
                             <div class="dynamics-tree-section">
@@ -674,106 +884,58 @@
                           </div>
                         {/if}
                       </div>
-                    </div>
-                  </div>
-                {:else}
-                  <!-- Original 3-column layout: Heatmap | Tree | Detail -->
-                  <div class="dynamics-split">
-                    <div class="dynamics-heatmap-section">
-                      <ClonalDynamicsHeatmap
-                        entries={filteredDynamicsEntries}
-                        timepointLabels={dynamicsData.timepointLabels}
-                        timepointTotals={dynamicsData.timepointTotals}
-                        onCloneClick={handleDynamicsCloneClick}
-                      />
-                    </div>
+                    {/if}
 
-                    <div class="dynamics-tree-panel">
-                      {#if selectedDynamicsEntry}
-                        {#if selectedDynamicsTree}
-                          <div class="dynamics-tree-section">
-                            <div class="dynamics-tree-header">
-                              <svg width="10" height="10" viewBox="0 0 16 16" fill="none">
-                                <path d="M8 2v4M8 6H4v4M8 6h4v4M4 10v4M12 10v4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-                              </svg>
-                              <span class="dynamics-tree-title">Phylogenetic Tree</span>
-                              <span class="dynamics-tree-label">{getTreeLabel(selectedDynamicsTree.meta)}</span>
+                    {#if dynamicsViewMode === 'heatmap'}
+                      <div class="dynamics-detail-panel">
+                        {#if selectedDynamicsEntry}
+                          <div class="dynamics-detail-card">
+                            <div class="dynamics-detail-header">
+                              <h3>{selectedDynamicsEntry.cloneLabel}</h3>
+                              <span class="status-pill {selectedDynamicsEntry.status}">{selectedDynamicsEntry.status.replace('_', ' ')}</span>
                             </div>
-                            <div class="dynamics-tree-container">
-                              <InteractiveTree
-                                newickPath={getTreeNewickPath(selectedDynamicsTree.meta.path)}
-                                treeName={getTreeLabel(selectedDynamicsTree.meta)}
-                                cloneSize={selectedDynamicsTree.meta.clone_size || 0}
-                              />
-                            </div>
-                          </div>
-                        {:else}
-                          <div class="dynamics-tree-empty-full">
-                            <svg width="32" height="32" viewBox="0 0 16 16" fill="none">
-                              <path d="M8 2v4M8 6H4v4M8 6h4v4M4 10v4M12 10v4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-                            </svg>
-                            <span>No phylogenetic tree available{selectedDynamicsTimepoint ? ` for ${selectedDynamicsTimepoint}` : ''}</span>
-                            <span class="dynamics-tree-hint">Trees are built for the top 20 clones per timepoint. Click a timepoint cell to look up trees.</span>
-                          </div>
-                        {/if}
-                      {:else}
-                        <div class="dynamics-tree-empty-full">
-                          <svg width="32" height="32" viewBox="0 0 16 16" fill="none">
-                            <path d="M8 2v4M8 6H4v4M8 6h4v4M4 10v4M12 10v4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-                          </svg>
-                          <span>Select a clone to view its phylogenetic tree</span>
-                        </div>
-                      {/if}
-                    </div>
-
-                    <div class="dynamics-detail-panel">
-                      {#if selectedDynamicsEntry}
-                        <div class="dynamics-detail-card">
-                          <div class="dynamics-detail-header">
-                            <h3>{selectedDynamicsEntry.cloneLabel}</h3>
-                            <span class="status-pill {selectedDynamicsEntry.status}">{selectedDynamicsEntry.status.replace('_', ' ')}</span>
-                          </div>
-                          <div class="dynamics-detail-body">
-                            <div class="detail-row"><span class="detail-label">CDR3 AA:</span><code>{selectedDynamicsEntry.cdr3Aa || '(none)'}</code></div>
-                            <div class="detail-row"><span class="detail-label">V Gene:</span><span>{selectedDynamicsEntry.vGene}</span></div>
-                            <div class="detail-row"><span class="detail-label">J Gene:</span><span>{selectedDynamicsEntry.jGene}</span></div>
-                            <div class="detail-row"><span class="detail-label">Total seqs:</span><span>{selectedDynamicsEntry.totalRawCount} sequences</span></div>
-                            <h4 class="tp-sizes-heading">Timepoint Frequencies</h4>
-                            <div class="tp-sizes">
-                              {#each selectedDynamicsEntry.timepointSizes as tpSize}
-                                <div class="tp-size-item">
-                                  <span class="tp-size-label">{tpSize.label}</span>
-                                  <div class="tp-size-bar-bg">
-                                    <div class="tp-size-bar" style="width: {Math.max(2, tpSize.frequency / Math.max(0.001, ...selectedDynamicsEntry.timepointSizes.map(t => t.frequency)) * 100)}%"></div>
-                                  </div>
-                                  <span class="tp-size-val">{(tpSize.frequency * 100).toFixed(2)}%</span>
-                                  <span class="tp-size-raw">({tpSize.rawCount})</span>
-                                </div>
-                              {/each}
-                            </div>
-                            {#if selectedDynamicsEntry.cloneIdsByTimepoint}
-                              <h4 class="tp-sizes-heading">Clone IDs by Timepoint</h4>
-                              <div class="clone-ids-by-tp">
-                                {#each Object.entries(selectedDynamicsEntry.cloneIdsByTimepoint) as [tp, cids]}
-                                  <div class="clone-tp-row">
-                                    <span class="clone-tp-label">{tp}:</span>
-                                    <span class="clone-tp-ids">{cids.join(', ')}</span>
+                            <div class="dynamics-detail-body">
+                              <div class="detail-row"><span class="detail-label">CDR3 AA:</span><code>{selectedDynamicsEntry.cdr3Aa || '(none)'}</code></div>
+                              <div class="detail-row"><span class="detail-label">V Gene:</span><span>{selectedDynamicsEntry.vGene}</span></div>
+                              <div class="detail-row"><span class="detail-label">J Gene:</span><span>{selectedDynamicsEntry.jGene}</span></div>
+                              <div class="detail-row"><span class="detail-label">Total seqs:</span><span>{selectedDynamicsEntry.totalRawCount} sequences</span></div>
+                              <h4 class="tp-sizes-heading">Timepoint Frequencies</h4>
+                              <div class="tp-sizes">
+                                {#each selectedDynamicsEntry.timepointSizes as tpSize}
+                                  <div class="tp-size-item">
+                                    <span class="tp-size-label">{tpSize.label}</span>
+                                    <div class="tp-size-bar-bg">
+                                      <div class="tp-size-bar" style="width: {Math.max(2, tpSize.frequency / Math.max(0.001, ...selectedDynamicsEntry.timepointSizes.map(t => t.frequency)) * 100)}%"></div>
+                                    </div>
+                                    <span class="tp-size-val">{(tpSize.frequency * 100).toFixed(2)}%</span>
+                                    <span class="tp-size-raw">({tpSize.rawCount})</span>
                                   </div>
                                 {/each}
                               </div>
-                            {/if}
+                              {#if selectedDynamicsEntry.cloneIdsByTimepoint}
+                                <h4 class="tp-sizes-heading">Clone IDs by Timepoint</h4>
+                                <div class="clone-ids-by-tp">
+                                  {#each Object.entries(selectedDynamicsEntry.cloneIdsByTimepoint) as [tp, cids]}
+                                    <div class="clone-tp-row">
+                                      <span class="clone-tp-label">{tp}:</span>
+                                      <span class="clone-tp-ids">{cids.join(', ')}</span>
+                                    </div>
+                                  {/each}
+                                </div>
+                              {/if}
+                            </div>
                           </div>
-                        </div>
-                      {:else}
-                        <div class="dynamics-empty-detail">
-                          <svg width="40" height="40" viewBox="0 0 40 40" fill="none">
-                            <rect x="4" y="8" width="32" height="24" rx="3" stroke="currentColor" stroke-width="1.5"/>
-                            <path d="M4 14h32M14 14v18" stroke="currentColor" stroke-width="1.5"/>
-                          </svg>
-                          <p>Select a lineage from the heatmap to view details</p>
-                        </div>
-                      {/if}
-                    </div>
+                        {:else}
+                          <div class="dynamics-empty-detail">
+                            <svg width="40" height="40" viewBox="0 0 40 40" fill="none">
+                              <rect x="4" y="8" width="32" height="24" rx="3" stroke="currentColor" stroke-width="1.5"/>
+                              <path d="M4 14h32M14 14v18" stroke="currentColor" stroke-width="1.5"/>
+                            </svg>
+                            <p>Select a lineage from the heatmap to view details</p>
+                          </div>
+                        {/if}
+                      </div>
+                    {/if}
                   </div>
                 {/if}
               {:else}
@@ -1130,8 +1292,64 @@
     gap: var(--space-2);
     margin-bottom: 0;
   }
+  .status-filter-row {
+    flex-wrap: wrap;
+  }
   .status-filter-row .topn-label {
     margin-left: auto;
+  }
+  /* ── View mode toggle (Heatmap | Bubbles) ── */
+  .dynamics-view-toggle {
+    display: inline-flex;
+    border: 1px solid var(--gray-300);
+    border-radius: 6px;
+    overflow: hidden;
+    margin-left: var(--space-3);
+    flex-shrink: 0;
+  }
+  .view-toggle-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 10px;
+    border: none;
+    background: var(--gray-50);
+    color: var(--gray-600);
+    font-size: 11px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+  }
+  .view-toggle-btn:not(:last-child) {
+    border-right: 1px solid var(--gray-300);
+  }
+  .view-toggle-btn.active {
+    background: var(--color-primary);
+    color: white;
+  }
+  .view-toggle-btn:hover:not(.active) {
+    background: var(--gray-200);
+  }
+
+  /* ── Bubble-specific controls ── */
+  .bubble-controls {
+    display: flex;
+    gap: var(--space-3);
+    align-items: center;
+  }
+  .bubble-control-label {
+    font-size: 11px;
+    color: var(--gray-600);
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .bubble-control-label select {
+    font-size: 11px;
+    padding: 2px 4px;
+    border: 1px solid var(--gray-300);
+    border-radius: 4px;
+    background: white;
   }
   .status-filter-label {
     font-size: var(--text-sm);
@@ -1488,7 +1706,7 @@
   .dynamics-cohort-heatmaps {
     display: flex;
     gap: var(--space-3);
-    flex: 0 0 auto;
+    flex: 2;
     min-width: 0;
     height: 100%;
   }
@@ -1496,7 +1714,8 @@
   .dynamics-cohort-hm {
     display: flex;
     flex-direction: column;
-    min-width: 0;
+    flex: 1;
+    min-width: 280px;
     height: 100%;
     overflow: hidden;
   }
@@ -1514,7 +1733,8 @@
 
   .dynamics-cohort-right {
     flex: 1;
-    min-width: 0;
+    min-width: 280px;
+    max-width: 420px;
     height: 100%;
     display: flex;
     flex-direction: column;

@@ -18,6 +18,7 @@ export interface WizardTimepoint {
   label: string;
   fastaDir: string | null;
   fastaFiles: string[];
+  annotationFiles: string[];
 }
 
 export type CohortType = 'disease' | 'control';

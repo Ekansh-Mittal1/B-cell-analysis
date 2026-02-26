@@ -169,6 +169,7 @@ class PipelineRunner:
         self.filename_to_id: Dict[str, str] = {}    # filename -> numeric_id
         self.timepoint_mapping: Dict[str, Dict[str, str]] = {}  # staged_filename -> {timepoint, originalFile}
         self.timepoint_labels: List[str] = []  # ordered list of timepoint labels
+        self.tenx_c_gene_map: Dict[str, str] = {}  # contig_id -> c_gene (from 10x annotations)
         self.cancelled = False
     
     def _ensure_file_id_mapping(self):
@@ -286,7 +287,113 @@ class PipelineRunner:
         
         self.fasta_paths = cleaned_paths
         return len(self.fasta_paths) > 0
-    
+
+    def preprocess_10x_contigs(self) -> bool:
+        """Filter 10x contigs using paired annotation CSVs.
+
+        For each FASTA that has a matching *_filtered_annotations.csv in the
+        same directory, keep only the top-UMI contig per chain per cell and
+        store the 10x c_gene for later use as the isotype source.
+        """
+        import pandas as pd
+        from Bio import SeqIO
+
+        # Build a map from FASTA basename -> annotation CSV path using the
+        # timepoint_mapping (populated by load_timepoint_mapping or from disk).
+        tp_map = self.timepoint_mapping
+        if not tp_map:
+            tp_path = os.path.join(self.fasta_dir, 'timepoint_mapping.json')
+            if os.path.exists(tp_path):
+                with open(tp_path) as f:
+                    tp_map = json.load(f)
+
+        fasta_to_ann: Dict[str, str] = {}
+        for staged_name, info in tp_map.items():
+            ann_file = info.get('annotationFile')
+            if ann_file:
+                fasta_to_ann[staged_name] = os.path.join(self.fasta_dir, ann_file)
+
+        if not fasta_to_ann:
+            self.emit.log("info", "No 10x annotation files detected — skipping contig preprocessing")
+            return True
+
+        self.emit.progress("preprocessing", 12, "Preprocessing 10x contigs...")
+
+        clean_dir = os.path.join(self.output_dir, 'clean_10x')
+        os.makedirs(clean_dir, exist_ok=True)
+
+        new_fasta_paths: List[str] = []
+        total_input = 0
+        total_kept = 0
+
+        for fasta_path in self.fasta_paths:
+            basename = os.path.basename(fasta_path)
+            ann_path = fasta_to_ann.get(basename)
+
+            if not ann_path or not os.path.exists(ann_path):
+                new_fasta_paths.append(fasta_path)
+                continue
+
+            ann_df = pd.read_csv(ann_path)
+            file_input = len(ann_df)
+            total_input += file_input
+
+            # Apply 10x quality filters
+            keep = (
+                (ann_df['is_cell'].astype(str).str.upper() == 'TRUE') &
+                (ann_df['high_confidence'].astype(str).str.upper() == 'TRUE') &
+                (ann_df['productive'].astype(str).str.upper() == 'TRUE')
+            )
+            ann_df = ann_df[keep].copy()
+
+            # Per barcode + chain: keep the contig with the highest UMI count
+            ann_df['umis'] = pd.to_numeric(ann_df['umis'], errors='coerce').fillna(0).astype(int)
+            ann_df = ann_df.sort_values('umis', ascending=False)
+            ann_df = ann_df.drop_duplicates(subset=['barcode', 'chain'], keep='first')
+
+            selected_ids = set(ann_df['contig_id'].values)
+
+            # Store 10x c_gene for every selected contig
+            for _, row in ann_df.iterrows():
+                cg = str(row.get('c_gene', '')).strip()
+                if cg and cg.lower() != 'none' and cg.lower() != 'nan':
+                    self.tenx_c_gene_map[row['contig_id']] = cg
+
+            # Write filtered FASTA
+            clean_path = os.path.join(clean_dir, basename)
+            kept = 0
+            with open(clean_path, 'w') as out_f:
+                for record in SeqIO.parse(fasta_path, 'fasta'):
+                    if record.id in selected_ids:
+                        SeqIO.write(record, out_f, 'fasta')
+                        kept += 1
+
+            total_kept += kept
+            n_cells = ann_df['barcode'].nunique()
+            n_igh = len(ann_df[ann_df['chain'] == 'IGH'])
+            n_light = len(ann_df[ann_df['chain'].isin(['IGK', 'IGL'])])
+
+            sample_label = basename.replace('_filtered.fasta', '').lstrip('T0123456789_')
+            self.emit.log("info",
+                f"  {sample_label}: {file_input} contigs -> {n_cells} cells "
+                f"({n_igh} IGH, {n_light} IGK/IGL), {kept} seqs written")
+
+            new_fasta_paths.append(clean_path)
+
+        self.fasta_paths = new_fasta_paths
+
+        self.emit.log("info",
+            f"10x preprocessing complete: {total_kept} contigs kept, "
+            f"{len(self.tenx_c_gene_map)} c_gene annotations stored")
+
+        # Persist c_gene map for downstream steps
+        if self.tenx_c_gene_map:
+            map_path = os.path.join(self.output_dir, 'tenx_c_gene_map.json')
+            with open(map_path, 'w') as f:
+                json.dump(self.tenx_c_gene_map, f)
+
+        return True
+
     def setup_databases(self) -> bool:
         """Set up database paths."""
         self.emit.progress("setup", 15, "Setting up databases...")
@@ -541,6 +648,10 @@ class PipelineRunner:
         self.emit.progress("igblast", 25, "Running IgBLAST analysis...")
         
         try:
+            db_c = getattr(self, 'igblast_db_c', None)
+            version = self._get_igblast_version()
+            if version and version < (1, 18, 0):
+                db_c = None
             df, raw_output = blast.blast_get_top_hits_v(
                 input_fp=self.combined_fasta,
                 db_V_fp=self.igblast_db_v,
@@ -548,7 +659,8 @@ class PipelineRunner:
                 db_J_fp=self.igblast_db_j,
                 bin_dir=self.bin_dir,
                 data_dir=self.data_dir,
-                output_dir=self.output_dir
+                output_dir=self.output_dir,
+                db_C_fp=db_c
             )
             
             # Save results
@@ -676,6 +788,99 @@ class PipelineRunner:
                 return {tp: 0.1 for tp in self.timepoint_labels}
             return {'_global': 0.1}
     
+    def _restore_d_gene_fields(self, db_pass_path: str, clone_pass_path: str):
+        """Restore D-gene alignment fields that DefineClones.py strips.
+        
+        DefineClones zeroes out d_sequence_start/end, d_germline_start/end, and
+        np2_length for sequences with D gene calls. These fields are needed by
+        CreateGermlines to properly reconstruct heavy chain germlines.
+        """
+        import pandas as pd
+        if not os.path.exists(db_pass_path) or not os.path.exists(clone_pass_path):
+            return
+        
+        db_df = pd.read_table(db_pass_path)
+        cp_df = pd.read_table(clone_pass_path)
+        
+        d_fields = ['d_sequence_start', 'd_sequence_end', 'd_germline_start',
+                     'd_germline_end', 'np2_length']
+        
+        available = [f for f in d_fields if f in db_df.columns and f in cp_df.columns]
+        if not available:
+            return
+        
+        db_lookup = db_df.set_index('sequence_id')[available]
+        restored = 0
+        for col in available:
+            mask = cp_df[col].isna()
+            if mask.any():
+                cp_df.loc[mask, col] = cp_df.loc[mask, 'sequence_id'].map(db_lookup[col])
+                restored += mask.sum()
+        
+        if restored > 0:
+            cp_df.to_csv(clone_pass_path, sep='\t', index=False)
+            self.emit.log("info", f"  Restored {restored} D-gene field values in clone-pass")
+
+    def _rescue_dropped_sequences(self, clone_pass_path: str, germ_pass_path: str, label: str):
+        """Add sequences dropped by CreateGermlines back into germ-pass.
+        
+        CreateGermlines fails on most heavy chains due to D-gene germline
+        reconstruction issues. For these sequences, the MakeDb-generated
+        germline_alignment (already in clone-pass) is valid and identical
+        to what CreateGermlines would produce, so we use it directly.
+        """
+        import pandas as pd
+        if not os.path.exists(clone_pass_path):
+            return
+        
+        cp_df = pd.read_table(clone_pass_path)
+        
+        if os.path.exists(germ_pass_path):
+            gp_df = pd.read_table(germ_pass_path)
+        else:
+            gp_df = pd.DataFrame(columns=cp_df.columns)
+        
+        gp_ids = set(gp_df['sequence_id']) if 'sequence_id' in gp_df.columns else set()
+        dropped = cp_df[~cp_df['sequence_id'].isin(gp_ids)].copy()
+        
+        if len(dropped) == 0:
+            return
+        
+        # Only rescue sequences that have both germline_alignment and sequence_alignment
+        # with matching lengths (these are the ones MakeDb processed correctly)
+        if 'germline_alignment' not in dropped.columns or 'sequence_alignment' not in dropped.columns:
+            return
+        
+        valid_mask = (
+            dropped['germline_alignment'].notna() &
+            dropped['sequence_alignment'].notna() &
+            (dropped['germline_alignment'].str.len() == dropped['sequence_alignment'].str.len())
+        )
+        rescuable = dropped[valid_mask].copy()
+        
+        if len(rescuable) == 0:
+            return
+        
+        # Add the columns CreateGermlines would produce
+        rescuable['germline_alignment_d_mask'] = rescuable['germline_alignment']
+        if 'v_call' in rescuable.columns:
+            rescuable['germline_v_call'] = rescuable['v_call']
+        if 'd_call' in rescuable.columns:
+            rescuable['germline_d_call'] = rescuable['d_call']
+        if 'j_call' in rescuable.columns:
+            rescuable['germline_j_call'] = rescuable['j_call']
+        
+        # Ensure column alignment with germ-pass
+        for col in gp_df.columns:
+            if col not in rescuable.columns:
+                rescuable[col] = pd.NA
+        
+        combined = pd.concat([gp_df, rescuable[gp_df.columns]], ignore_index=True)
+        combined.to_csv(germ_pass_path, sep='\t', index=False)
+        
+        self.emit.log("info", f"  {label}: rescued {len(rescuable)} sequences dropped by CreateGermlines "
+                       f"(total germ-pass: {len(gp_df)} -> {len(combined)})")
+
     def run_clonality_analysis(self, thresholds: Dict[str, float]) -> bool:
         """Run clonality analysis - per timepoint if mapping available, else single global.
         
@@ -699,7 +904,11 @@ class PipelineRunner:
                     
                     self.emit.log("info", f"Clone definition (single cohort): mode={self.clone_mode}, linkage={self.linkage_method}, threshold={threshold}")
                     define_clonality(db_pass_path, str(threshold), mode=self.clone_mode, link=self.linkage_method)
+                    self._restore_d_gene_fields(db_pass_path, clone_pass_path)
                     create_germline(clone_pass_path, self.database_v, self.database_d, self.database_j)
+                    
+                    germ_pass_path = os.path.join(self.output_dir, "ig_out_data_db-pass_clone-pass_germ-pass.tsv")
+                    self._rescue_dropped_sequences(clone_pass_path, germ_pass_path, "global")
                     self.emit.log("info", "Clonality analysis complete (single cohort)")
                 finally:
                     clonalityFunctions.outs_dir = original_outs_dir
@@ -713,6 +922,7 @@ class PipelineRunner:
             per_tp_dir = os.path.join(self.output_dir, 'per_timepoint')
             
             all_germ_dfs = []
+            all_clone_dfs = []
             clone_id_offset = 0
             
             for tp_idx, tp_label in enumerate(self.timepoint_labels):
@@ -738,44 +948,71 @@ class PipelineRunner:
                         self.emit.log("warn", f"  {tp_label}: clone-pass.tsv not created, skipping germline")
                         continue
                     
+                    # DefineClones strips D-gene alignment fields (d_sequence_start/end,
+                    # d_germline_start/end, np2_length). Restore them from db-pass so
+                    # CreateGermlines can reconstruct heavy chain germlines properly.
+                    self._restore_d_gene_fields(db_pass_path, clone_pass_path)
+                    
                     create_germline(clone_pass_path, self.database_v, self.database_d, self.database_j)
                     
+                    # Rescue heavy chains dropped by CreateGermlines: their MakeDb
+                    # germline_alignment is already valid, so we can add them back.
                     germ_pass_path = os.path.join(tp_dir, 'db-pass_clone-pass_germ-pass.tsv')
-                    if not os.path.exists(germ_pass_path):
-                        self.emit.log("warn", f"  {tp_label}: germ-pass.tsv not created")
-                        continue
+                    self._rescue_dropped_sequences(clone_pass_path, germ_pass_path, tp_label)
                     
-                    # Read germ-pass and remap clone IDs to be globally unique
-                    tp_df = pd.read_table(germ_pass_path)
+                    # Read clone-pass (ALL sequences with clone_id) and remap IDs
+                    tp_clone_df = pd.read_table(clone_pass_path)
+                    tp_offset = clone_id_offset
                     
-                    if 'clone_id' in tp_df.columns:
-                        # Find max clone_id in this timepoint
-                        valid_ids = tp_df['clone_id'].dropna()
+                    if 'clone_id' in tp_clone_df.columns:
+                        valid_ids = tp_clone_df['clone_id'].dropna()
                         if len(valid_ids) > 0:
                             max_id = int(valid_ids.max())
-                            tp_df['clone_id'] = tp_df['clone_id'].apply(
-                                lambda x: int(x) + clone_id_offset if pd.notna(x) else x
+                            tp_clone_df['clone_id'] = tp_clone_df['clone_id'].apply(
+                                lambda x: int(x) + tp_offset if pd.notna(x) else x
                             )
                             clone_id_offset += max_id + 1
                     
-                    # Add timepoint column for reference
-                    tp_df['timepoint'] = tp_label
+                    tp_clone_df['timepoint'] = tp_label
+                    tp_clone_df.to_csv(clone_pass_path, sep='\t', index=False)
+                    all_clone_dfs.append(tp_clone_df)
                     
-                    # Save remapped version back
-                    tp_df.to_csv(germ_pass_path, sep='\t', index=False)
+                    # Read germ-pass (now includes rescued sequences)
+                    germ_count = 0
+                    if os.path.exists(germ_pass_path):
+                        tp_germ_df = pd.read_table(germ_pass_path)
+                        if 'clone_id' in tp_germ_df.columns:
+                            tp_germ_df['clone_id'] = tp_germ_df['clone_id'].apply(
+                                lambda x: int(x) + tp_offset if pd.notna(x) else x
+                            )
+                        tp_germ_df['timepoint'] = tp_label
+                        tp_germ_df.to_csv(germ_pass_path, sep='\t', index=False)
+                        all_germ_dfs.append(tp_germ_df)
+                        germ_count = len(tp_germ_df)
+                    else:
+                        self.emit.log("warn", f"  {tp_label}: germ-pass.tsv not created")
                     
-                    all_germ_dfs.append(tp_df)
-                    self.emit.log("info", f"  {tp_label}: {len(tp_df)} sequences with clones defined")
+                    self.emit.log("info", f"  {tp_label}: {len(tp_clone_df)} clone-pass, "
+                                  f"{germ_count} germ-pass sequences")
                     
                 finally:
                     clonalityFunctions.outs_dir = original_outs_dir
             
-            if not all_germ_dfs:
+            if not all_clone_dfs:
                 self.emit.log("error", "No timepoints produced clonality results")
                 return False
             
-            # Merge all per-timepoint germ-pass TSVs into one
-            merged_df = pd.concat(all_germ_dfs, ignore_index=True)
+            # Merge all per-timepoint clone-pass TSVs
+            merged_clone_df = pd.concat(all_clone_dfs, ignore_index=True)
+            merged_clone_path = os.path.join(self.output_dir, "ig_out_data_db-pass_clone-pass.tsv")
+            merged_clone_df.to_csv(merged_clone_path, sep='\t', index=False)
+            self.emit.log("info", f"Merged clone-pass: {len(merged_clone_df)} total sequences")
+            
+            # Merge all per-timepoint germ-pass TSVs
+            if all_germ_dfs:
+                merged_df = pd.concat(all_germ_dfs, ignore_index=True)
+            else:
+                merged_df = pd.DataFrame()
             merged_path = os.path.join(self.output_dir, "ig_out_data_db-pass_clone-pass_germ-pass.tsv")
             merged_df.to_csv(merged_path, sep='\t', index=False)
             
@@ -928,76 +1165,229 @@ class PipelineRunner:
             traceback.print_exc()
             return True  # Non-fatal
     
+    def _get_igblast_version(self) -> Optional[tuple]:
+        """Return (major, minor, patch) version tuple of the installed igblastn, or None."""
+        import subprocess
+        igblastn_path = os.path.join(self.bin_dir, 'igblastn')
+        if not os.path.exists(igblastn_path):
+            return None
+        try:
+            result = subprocess.run([igblastn_path, '-version'],
+                                    capture_output=True, text=True, timeout=10)
+            import re
+            m = re.search(r'igblastn:\s*(\d+)\.(\d+)\.(\d+)', result.stdout)
+            if m:
+                return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        except Exception:
+            pass
+        return None
+
+    def _assign_c_genes_igblast_native(self, igblast_db_c: str) -> Optional[dict]:
+        """Use igblastn with -c_region_db and AIRR output to assign C genes (IgBLAST >= 1.18).
+
+        This is the standard method: IgBLAST identifies V/D/J boundaries first,
+        then searches the 3' post-J region specifically for constant genes.
+        Returns c_call_map or None on failure.
+        """
+        import subprocess
+        import pandas as pd
+
+        igblastn_path = os.path.join(self.bin_dir, 'igblastn')
+        aux_data_path = os.path.join(self.data_dir, 'optional_data', 'human_gl.aux')
+        airr_out = os.path.join(self.output_dir, 'c_gene_airr.tsv')
+
+        env = os.environ.copy()
+        env['IGDATA'] = self.data_dir
+
+        cmd = [
+            igblastn_path,
+            '-germline_db_V', self.igblast_db_v,
+            '-germline_db_D', self.igblast_db_d,
+            '-germline_db_J', self.igblast_db_j,
+            '-c_region_db', igblast_db_c,
+            '-query', self.combined_fasta,
+            '-auxiliary_data', aux_data_path,
+            '-outfmt', '19',
+            '-num_threads', '4',
+            '-out', airr_out
+        ]
+
+        self.emit.log("info", "Running igblastn with -c_region_db (AIRR format) for C gene assignment...")
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True,
+                                    timeout=600, cwd=os.path.dirname(self.bin_dir), env=env)
+        except subprocess.TimeoutExpired:
+            self.emit.log("warn", "igblastn AIRR run timed out")
+            return None
+
+        if result.returncode != 0:
+            self.emit.log("warn", f"igblastn AIRR failed (rc={result.returncode}): {result.stderr[:300]}")
+            return None
+
+        if not os.path.exists(airr_out) or os.path.getsize(airr_out) == 0:
+            self.emit.log("warn", "igblastn AIRR produced no output")
+            return None
+
+        try:
+            airr_df = pd.read_csv(airr_out, sep='\t')
+        except Exception as e:
+            self.emit.log("warn", f"Failed to parse AIRR output: {e}")
+            return None
+
+        if 'c_call' not in airr_df.columns:
+            self.emit.log("warn", "AIRR output missing c_call column")
+            return None
+
+        seq_id_col = 'sequence_id' if 'sequence_id' in airr_df.columns else airr_df.columns[0]
+
+        c_call_map = {}
+        for _, row in airr_df.iterrows():
+            seq_id = str(row[seq_id_col])
+            c_call = row.get('c_call')
+            if pd.notna(c_call) and str(c_call).strip():
+                c_call_map[seq_id] = str(c_call).strip()
+
+        return c_call_map
+
+    def _assign_c_genes_blastn_fallback(self, igblast_db_c: str) -> Optional[dict]:
+        """Fallback: standalone blastn search of full sequences against C gene DB.
+
+        Used when IgBLAST < 1.18 (no -c_region_db support).
+        Standard thresholds: top hit, >= 80% identity, >= 50 nt alignment, evalue 1e-5.
+        Less accurate than native IgBLAST because V/D/J regions create noise.
+        """
+        import subprocess
+        import pandas as pd
+
+        blastn_path = os.path.join(self.bin_dir, 'blastn')
+        if not os.path.exists(blastn_path):
+            blastn_path = 'blastn'
+
+        blast_out = os.path.join(self.output_dir, 'c_gene_blast.tsv')
+        cmd = [
+            blastn_path,
+            '-query', self.combined_fasta,
+            '-db', igblast_db_c,
+            '-outfmt', '6 qseqid sseqid pident length',
+            '-max_target_seqs', '1',
+            '-max_hsps', '1',
+            '-evalue', '1e-5',
+            '-num_threads', '4',
+            '-out', blast_out
+        ]
+
+        self.emit.log("info", f"Running blastn fallback for C gene assignment (upgrade IgBLAST to >= 1.18 for better results)...")
+
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        except subprocess.TimeoutExpired:
+            self.emit.log("warn", "blastn for C gene timed out")
+            return None
+
+        if result.returncode != 0:
+            self.emit.log("warn", f"blastn for C gene failed (rc={result.returncode}): {result.stderr[:300]}")
+            return None
+
+        c_call_map = {}
+        if os.path.exists(blast_out) and os.path.getsize(blast_out) > 0:
+            blast_df = pd.read_csv(blast_out, sep='\t', header=None,
+                                   names=['qseqid', 'sseqid', 'pident', 'length'])
+            good_hits = blast_df[(blast_df['pident'] >= 80.0) & (blast_df['length'] >= 50)]
+            for _, row in good_hits.iterrows():
+                seq_id = str(row['qseqid'])
+                if seq_id not in c_call_map:
+                    c_call_map[seq_id] = str(row['sseqid'])
+
+            self.emit.log("info",
+                f"C gene assignment (blastn fallback): {len(c_call_map)}/{len(blast_df['qseqid'].unique())} "
+                f"sequences passed filters (>= 80% identity, >= 50 nt)")
+        else:
+            self.emit.log("warn", "blastn produced no output for C gene assignment")
+            return None
+
+        return c_call_map
+
+    def _build_tenx_c_call_map(self) -> Optional[Dict[str, str]]:
+        """Build a sequence_id -> c_gene map from 10x annotations.
+
+        The 10x c_gene map keys are original contig IDs (before the file-ID
+        suffix was appended by combine_fasta_files).  Pipeline sequence IDs
+        have the form ``<contig_id>_<file_id>``; we strip the known file-ID
+        suffix to recover the original contig ID for lookup.
+        """
+        if not self.tenx_c_gene_map:
+            map_path = os.path.join(self.output_dir, 'tenx_c_gene_map.json')
+            if os.path.exists(map_path):
+                with open(map_path) as f:
+                    self.tenx_c_gene_map = json.load(f)
+            if not self.tenx_c_gene_map:
+                return None
+
+        self._ensure_file_id_mapping()
+        known_suffixes = set(self.file_id_mapping.keys())
+
+        import pandas as pd
+        c_call_map: Dict[str, str] = {}
+
+        db_pass = os.path.join(self.output_dir, 'ig_out_data_db-pass.tsv')
+        if os.path.exists(db_pass):
+            df = pd.read_table(db_pass, usecols=['sequence_id'])
+            for seq_id in df['sequence_id']:
+                parts = str(seq_id).rsplit('_', 1)
+                if len(parts) == 2 and parts[1] in known_suffixes:
+                    contig_id = parts[0]
+                else:
+                    contig_id = str(seq_id)
+                c_gene = self.tenx_c_gene_map.get(contig_id)
+                if c_gene:
+                    c_call_map[str(seq_id)] = c_gene
+
+        return c_call_map if c_call_map else None
+
     def assign_c_genes(self) -> bool:
-        """Assign C gene (isotype) to each sequence via blastn against the C gene database.
-        
-        The installed IgBLAST (1.16) does not support -c_region_db, so we perform a
-        separate blastn search of the combined FASTA against the C gene BLAST database.
-        The top hit per query (≥ 80% identity, ≥ 50 nt alignment) is assigned as c_call.
-        The result is written into the germ-pass TSV's c_call column.
+        """Assign C gene (isotype) to each sequence.
+
+        When 10x annotation data is available (from preprocess_10x_contigs),
+        the 10x c_gene is used directly — no BLAST needed.
+
+        Otherwise, preferred method (IgBLAST >= 1.18): uses igblastn with
+        -c_region_db and AIRR format output. Fallback: standalone blastn.
         """
         self.emit.progress("c_gene", 55, "Assigning isotype (C gene)...")
-        
-        igblast_db_c = getattr(self, 'igblast_db_c', None)
-        if not igblast_db_c:
-            self.emit.log("info", "No C gene database available, skipping isotype assignment")
-            return True  # Non-fatal
-        
-        # Verify BLAST DB exists
-        if not any(os.path.exists(igblast_db_c + ext) for ext in ['.ndb', '.nin', '.nsq']):
-            self.emit.log("warn", "C gene BLAST database index files not found, skipping isotype assignment")
-            return True
-        
+
         try:
-            import subprocess
             import pandas as pd
-            
-            blastn_path = os.path.join(self.bin_dir, 'blastn')
-            if not os.path.exists(blastn_path):
-                # Fallback to system blastn
-                blastn_path = 'blastn'
-            
-            # Run blastn: combined.fasta vs C gene DB
-            # Output format 6 (tabular): qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore
-            blast_out = os.path.join(self.output_dir, 'c_gene_blast.tsv')
-            cmd = [
-                blastn_path,
-                '-query', self.combined_fasta,
-                '-db', igblast_db_c,
-                '-outfmt', '6 qseqid sseqid pident length',
-                '-max_target_seqs', '1',        # Only top hit per query
-                '-max_hsps', '1',                # Only best HSP
-                '-evalue', '1e-5',               # Stringent e-value
-                '-num_threads', '4',
-                '-out', blast_out
-            ]
-            
-            self.emit.log("info", f"Running blastn for C gene assignment: {' '.join(cmd[:6])}...")
-            
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-            
-            if result.returncode != 0:
-                self.emit.log("warn", f"blastn for C gene failed (rc={result.returncode}): {result.stderr[:300]}")
-                return True  # Non-fatal
-            
-            # Parse results: keep hits with ≥80% identity and ≥50nt alignment
-            c_call_map = {}  # sequence_id -> c_call (e.g. "IGHM*01")
-            if os.path.exists(blast_out) and os.path.getsize(blast_out) > 0:
-                blast_df = pd.read_csv(blast_out, sep='\t', header=None,
-                                       names=['qseqid', 'sseqid', 'pident', 'length'])
-                
-                good_hits = blast_df[(blast_df['pident'] >= 80.0) & (blast_df['length'] >= 50)]
-                
-                for _, row in good_hits.iterrows():
-                    seq_id = str(row['qseqid'])
-                    c_gene = str(row['sseqid'])  # e.g. "IGHM*01"
-                    c_call_map[seq_id] = c_gene
-                
-                self.emit.log("info", f"C gene assignment: {len(c_call_map)}/{len(blast_df)} sequences passed filters (≥80% id, ≥50nt)")
+
+            # Prefer 10x ground-truth c_gene when available
+            c_call_map = self._build_tenx_c_call_map()
+            if c_call_map:
+                self.emit.log("info",
+                    f"Using 10x c_gene annotations for {len(self.tenx_c_gene_map)} contigs "
+                    f"({len(c_call_map)} sequence IDs mapped)")
             else:
-                self.emit.log("warn", "blastn produced no output for C gene assignment")
-                return True
-            
+                igblast_db_c = getattr(self, 'igblast_db_c', None)
+                if not igblast_db_c:
+                    self.emit.log("info", "No C gene database available, skipping isotype assignment")
+                    return True
+
+                if not any(os.path.exists(igblast_db_c + ext) for ext in ['.ndb', '.nin', '.nsq']):
+                    self.emit.log("warn", "C gene BLAST database index files not found, skipping isotype assignment")
+                    return True
+
+                version = self._get_igblast_version()
+
+                if version and version >= (1, 18, 0):
+                    self.emit.log("info", f"IgBLAST {'.'.join(map(str, version))} supports -c_region_db — using native C gene assignment")
+                    c_call_map = self._assign_c_genes_igblast_native(igblast_db_c)
+                else:
+                    ver_str = '.'.join(map(str, version)) if version else 'unknown'
+                    self.emit.log("warn",
+                        f"IgBLAST version {ver_str} < 1.18 — using blastn fallback for C gene assignment. "
+                        f"Upgrade IgBLAST to >= 1.18 (latest: 1.22.0) for significantly better isotype coverage.")
+
+                if c_call_map is None:
+                    c_call_map = self._assign_c_genes_blastn_fallback(igblast_db_c)
+
             if not c_call_map:
                 self.emit.log("warn", "No sequences met C gene assignment thresholds")
                 return True
@@ -1020,16 +1410,26 @@ class PipelineRunner:
                 assigned = (df['c_call'] != '').sum()
                 self.emit.log("info", f"Updated {germ_pass_path}: {assigned}/{len(df)} sequences have c_call")
             
-            # Also update db-pass and clone-pass TSVs for completeness
-            for tsv_name in ['ig_out_data_db-pass.tsv', 'ig_out_data_db-pass_clone-pass.tsv']:
-                tsv_path = os.path.join(self.output_dir, tsv_name)
+            # Also update db-pass, clone-pass, and per-timepoint clone-pass TSVs
+            tsv_paths = [
+                os.path.join(self.output_dir, 'ig_out_data_db-pass.tsv'),
+                os.path.join(self.output_dir, 'ig_out_data_db-pass_clone-pass.tsv'),
+            ]
+            per_tp_dir = os.path.join(self.output_dir, 'per_timepoint')
+            if os.path.isdir(per_tp_dir):
+                for tp in os.listdir(per_tp_dir):
+                    tp_cp = os.path.join(per_tp_dir, tp, 'db-pass_clone-pass.tsv')
+                    if os.path.exists(tp_cp):
+                        tsv_paths.append(tp_cp)
+
+            for tsv_path in tsv_paths:
                 if os.path.exists(tsv_path):
                     try:
                         df = pd.read_table(tsv_path)
                         df['c_call'] = df['sequence_id'].map(c_call_map).fillna('')
                         df.to_csv(tsv_path, sep='\t', index=False)
                     except Exception as e:
-                        self.emit.log("warn", f"Could not update {tsv_name}: {e}")
+                        self.emit.log("warn", f"Could not update {tsv_path}: {e}")
             
             return True
             
@@ -1068,6 +1468,38 @@ class PipelineRunner:
         
         if not top_clones:
             self.emit.log("info", f"[{label}] No clones with >= 3 sequences, skipping trees")
+            return []
+        
+        # BuildTrees.py aborts the entire batch if any clone has inconsistent
+        # germlines (different germline_alignment_d_mask within a clone). Filter
+        # these out, then backfill from the next-largest clones to stay at 20.
+        if 'germline_alignment_d_mask' in clonedf.columns:
+            consistent_clones = []
+            skipped = 0
+            for cid in top_clones:
+                n_unique = clonedf.loc[clonedf['clone_id'] == cid, 'germline_alignment_d_mask'].nunique()
+                if n_unique <= 1:
+                    consistent_clones.append(cid)
+                else:
+                    skipped += 1
+                    self.emit.log("info", f"[{label}] Skipping clone {cid}: {n_unique} distinct germlines within clone")
+            
+            if skipped > 0:
+                # Backfill from next-largest valid clones
+                remaining = valid_clones.drop(top_clones, errors='ignore')
+                for cid in remaining.index:
+                    if len(consistent_clones) >= 20:
+                        break
+                    n_unique = clonedf.loc[clonedf['clone_id'] == cid, 'germline_alignment_d_mask'].nunique()
+                    if n_unique <= 1:
+                        consistent_clones.append(cid)
+                
+                self.emit.log("info", f"[{label}] {skipped} clones had inconsistent germlines, "
+                              f"building trees for {len(consistent_clones)} clones")
+                top_clones = consistent_clones
+        
+        if not top_clones:
+            self.emit.log("info", f"[{label}] No clones with consistent germlines, skipping trees")
             return []
         
         self.emit.log("info", f"[{label}] Building trees for {len(top_clones)} clones")
@@ -1500,6 +1932,36 @@ class PipelineRunner:
                         'lineage_id': lineage_id
                     }
             
+            # Supplement clone_id + c_call from merged clone-pass (heavy chains dropped by CreateGermlines)
+            merged_cp_path = os.path.join(self.output_dir, 'ig_out_data_db-pass_clone-pass.tsv')
+            if os.path.exists(merged_cp_path):
+                cp_df = pd.read_table(merged_cp_path)
+                clone_counts_cp = {}
+                if 'clone_id' in cp_df.columns:
+                    for cid in cp_df['clone_id'].dropna().unique():
+                        clone_counts_cp[int(cid)] = int((cp_df['clone_id'] == cid).sum())
+                for _, row in cp_df.iterrows():
+                    seq_id = str(row['sequence_id'])
+                    c_call_val = str(row['c_call']).strip() if 'c_call' in cp_df.columns and pd.notna(row.get('c_call')) and str(row['c_call']).strip() else None
+                    cp_clone_id = int(row['clone_id']) if pd.notna(row.get('clone_id')) else None
+                    if seq_id in clone_data:
+                        if not clone_data[seq_id].get('c_call') and c_call_val:
+                            clone_data[seq_id]['c_call'] = c_call_val
+                        if clone_data[seq_id].get('clone_id') is None and cp_clone_id is not None:
+                            clone_data[seq_id]['clone_id'] = cp_clone_id
+                            clone_data[seq_id]['clone_count'] = clone_counts_cp.get(cp_clone_id, 0)
+                    elif c_call_val or cp_clone_id is not None:
+                        junction = str(row['junction']) if pd.notna(row.get('junction')) else None
+                        junction_aa = str(row['junction_aa']) if pd.notna(row.get('junction_aa')) else None
+                        clone_data[seq_id] = {
+                            'clone_id': cp_clone_id,
+                            'clone_count': clone_counts_cp.get(cp_clone_id, 0) if cp_clone_id else 0,
+                            'productive': True,
+                            'cdr3_dna': junction,
+                            'cdr3_peptide': junction_aa,
+                            'c_call': c_call_val,
+                        }
+
             # Load non-productive sequences from fail file (if --failed flag was used)
             clone_fail_path = os.path.join(self.output_dir, 'ig_out_data_db-fail.tsv')
             if os.path.exists(clone_fail_path):
@@ -1703,6 +2165,11 @@ class PipelineRunner:
                 self.emit.complete(False, "Failed to clean FASTA files")
                 return False
             
+            # Step 2b: Preprocess 10x contigs (filter by annotations if available)
+            if not self.preprocess_10x_contigs():
+                self.emit.complete(False, "Failed to preprocess 10x contigs")
+                return False
+            
             # Step 3: Setup databases
             if not self.setup_databases():
                 self.emit.complete(False, "Failed to setup databases")
@@ -1745,7 +2212,7 @@ class PipelineRunner:
                 self.emit.complete(False, "Cancelled by user")
                 return False
             
-            # Step 8b: Assign C genes (isotype) via blastn
+            # Step 8b: Assign C genes (isotype) via igblastn -c_region_db (>= 1.18) or blastn fallback
             self.assign_c_genes()
             
             # Step 8c: Build cross-timepoint lineage map

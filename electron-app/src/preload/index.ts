@@ -85,7 +85,7 @@ const api = {
   cancelPipeline: (): Promise<void> => 
     ipcRenderer.invoke('pipeline:cancel'),
 
-  stageFiles: (timepoints: { label: string; files: string[] }[], studyName: string): Promise<{ success: boolean; stagingDir?: string; timepointMapping?: any; error?: string }> =>
+  stageFiles: (timepoints: { label: string; files: string[]; annotationFiles?: string[] }[], studyName: string): Promise<{ success: boolean; stagingDir?: string; timepointMapping?: any; error?: string }> =>
     ipcRenderer.invoke('pipeline:stageFiles', timepoints, studyName),
 
   loadResults: (outputDir: string, savePrevious?: { outputDir: string; design: any }, cohorts?: { cohortType: string; cohortName: string; outputDir: string }[]): Promise<{ success: boolean; error?: string }> =>

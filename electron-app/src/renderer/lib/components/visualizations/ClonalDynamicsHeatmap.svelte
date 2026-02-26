@@ -13,10 +13,10 @@
   // Layout
   const cellW = 72;
   const cellH = 32;
-  const labelWidth = 120;
+  const labelWidth = 48;
   const badgeWidth = 110;
-  const headerHeight = 70; // Extra space for totals row
-  const padding = 16;
+  const headerHeight = 70;
+  const padding = 8;
 
   $: svgWidth = labelWidth + timepointLabels.length * cellW + badgeWidth + padding * 2;
   $: svgHeight = headerHeight + entries.length * cellH + padding * 2;

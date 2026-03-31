@@ -177,6 +177,22 @@ export function loadResultsFromDisk(
         const seqId = row['sequence_id'] ?? '';
         const cloneId = row['clone_id'] ? parseInt(row['clone_id'], 10) : null;
         const lineageId = row['lineage_id'] ? parseInt(row['lineage_id'], 10) : null;
+
+        // Compute real SHM: count mismatches between sequence_alignment and germline_alignment
+        let shmCount: number | null = null;
+        const seqAlign = row['sequence_alignment'] || '';
+        const germAlign = row['germline_alignment'] || '';
+        if (seqAlign && germAlign && seqAlign.length === germAlign.length) {
+          let mismatches = 0;
+          for (let i = 0; i < seqAlign.length; i++) {
+            const s = seqAlign[i], g = germAlign[i];
+            if (s !== '.' && s !== 'N' && g !== '.' && g !== 'N' && s !== g) {
+              mismatches++;
+            }
+          }
+          shmCount = mismatches;
+        }
+
         cloneData[seqId] = {
           clone_id: isNaN(cloneId as number) ? null : cloneId,
           clone_count: cloneId != null ? (cloneCounts[cloneId] ?? 0) : 0,
@@ -185,6 +201,7 @@ export function loadResultsFromDisk(
           cdr3_peptide: row['junction_aa'] || null,
           dna_sequence: row['sequence'] || null,
           c_call: row['c_call']?.trim() || null,
+          somatic_mutations: shmCount,
           ...(lineageId != null && !isNaN(lineageId) ? { lineage_id: lineageId } : {})
         };
       }
@@ -303,10 +320,8 @@ export function loadResultsFromDisk(
           if (seq.j_gene.length > 4) seq.j_locus = seq.j_gene[3] + seq.j_gene[2] + seq.j_gene.slice(4, idx);
         }
       }
-      const cdr3Row = blast['CDR3'];
-      if (cdr3Row?.alignmentLength) {
-        seq.somatic_mutations = parseInt(cdr3Row.alignmentLength, 10) || null;
-      }
+      // somatic_mutations is computed from sequence_alignment vs germline_alignment
+      // in the cloneData (step 4 above), not from CDR3 alignment length
 
       if (cloneData[queryId]) {
         Object.assign(seq, cloneData[queryId]);
@@ -443,6 +458,24 @@ export function loadResultsFromDisk(
         }
       } catch (e) {
         console.warn('[ResultsLoader] Could not load timepoint_mapping.json:', e);
+      }
+    }
+
+    // 12. Load COVID matching results if present
+    const covidMatchPath = path.join(absOutputDir, 'covid_matches.json');
+    if (fs.existsSync(covidMatchPath)) {
+      try {
+        const covidContent = fs.readFileSync(covidMatchPath, 'utf-8');
+        const covidData = JSON.parse(covidContent);
+        if (covidData && covidData.top_clones) {
+          callbacks.onResult({
+            artifact: 'covid_matches',
+            data: covidData
+          });
+          console.log('[ResultsLoader] Loaded covid_matches.json');
+        }
+      } catch (e) {
+        console.warn('[ResultsLoader] Could not load covid_matches.json:', e);
       }
     }
 

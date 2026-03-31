@@ -28,19 +28,33 @@
   
   async function loadNewickFile() {
     console.log('[SimpleTreeViewer] Loading Newick file:', newickPath);
-    
+
     try {
-      const result = await window.electronAPI.readFile(newickPath);
-      
-      if (result.success && result.data) {
-        newickString = result.data;
-        console.log('[SimpleTreeViewer] Newick loaded, length:', newickString.length);
-        isLoading = false;
+      if (window.electronAPI) {
+        const result = await window.electronAPI.readFile(newickPath);
+        if (result.success && result.data) {
+          newickString = result.data;
+        } else {
+          console.error('[SimpleTreeViewer] Failed to read file:', result.error);
+          error = `Failed to read Newick file: ${result.error || 'Unknown error'}`;
+          isLoading = false;
+          return;
+        }
       } else {
-        console.error('[SimpleTreeViewer] Failed to read file:', result.error);
-        error = `Failed to read Newick file: ${result.error || 'Unknown error'}`;
-        isLoading = false;
+        // Demo mode: load from bundled demo data
+        const { getDemoData } = await import('../../lib/demo-loader');
+        const demoData = getDemoData();
+        const nw = demoData?.newick_trees?.[newickPath];
+        if (nw) {
+          newickString = nw;
+        } else {
+          error = 'Tree data not available in demo';
+          isLoading = false;
+          return;
+        }
       }
+      console.log('[SimpleTreeViewer] Newick loaded, length:', newickString.length);
+      isLoading = false;
     } catch (e: any) {
       console.error('[SimpleTreeViewer] Exception:', e);
       error = e.message || 'Unknown error loading tree';

@@ -1,7 +1,12 @@
 <script lang="ts">
+  import { onMount, onDestroy } from 'svelte';
   import { resultsState, type CohortType, type CovidMatchData } from '../../lib/stores/app';
+  import { covidMatchWorkbook, downloadXlsx } from '../../lib/utils/export-csv';
 
   let selectedCloneId: number | null = null;
+  let isRunning = false;
+  let runError: string | null = null;
+  const IS_ELECTRON = typeof window !== 'undefined' && !!window.electronAPI;
 
   $: hasCohorts = $resultsState.cohortResults.length > 0;
   let selectedCohort: CohortType = 'disease';
@@ -14,10 +19,23 @@
   $: covidData = hasCohorts
     ? (selectedCohort === 'disease' ? diseaseCovid : controlCovid)
     : $resultsState.covidMatchData;
+
+  // Whether ANY covid data exists (across all cohorts or global)
+  $: hasAnyCovidData = hasCohorts
+    ? $resultsState.cohortResults.some(c => !!c.covidMatchData)
+    : !!$resultsState.covidMatchData;
+
   $: selectedClone = covidData?.top_clones.find(c => c.clone_id === selectedCloneId);
-  
+
   $: if (covidData && !selectedCloneId && covidData.top_clones.length > 0) {
     selectedCloneId = covidData.top_clones[0].clone_id;
+  }
+
+  // When switching cohorts, reset selected clone
+  $: if (covidData) {
+    if (!covidData.top_clones.find(c => c.clone_id === selectedCloneId)) {
+      selectedCloneId = covidData.top_clones.length > 0 ? covidData.top_clones[0].clone_id : null;
+    }
   }
 
   function switchCohort(type: CohortType) {
@@ -38,34 +56,181 @@
     if (!data || data.stats.total_clones_analyzed === 0) return '0%';
     return ((data.stats.clones_with_high_matches / data.stats.total_clones_analyzed) * 100).toFixed(1) + '%';
   }
+
+  // ── Run COVID matching post-analysis ──
+  let cleanupResult: (() => void) | null = null;
+  let cleanupComplete: (() => void) | null = null;
+  let cleanupError: (() => void) | null = null;
+
+  // Capture the latest COVID match result from events so the sequential
+  // cohort loop can read it after each run completes.
+  let latestCovidResult: any = null;
+
+  onMount(() => {
+    if (window.electronAPI) {
+      cleanupResult = window.electronAPI.onCovidMatchResult((data: any) => {
+        if (data.artifact === 'covid_matches' && data.data) {
+          latestCovidResult = data.data;
+          resultsState.update(s => ({ ...s, covidMatchData: data.data }));
+        }
+      });
+
+      cleanupComplete = window.electronAPI.onCovidMatchComplete(() => {
+        // Don't set isRunning=false here — the runCovidMatching function
+        // manages that itself to support sequential multi-cohort runs.
+      });
+
+      cleanupError = window.electronAPI.onCovidMatchError((error: any) => {
+        isRunning = false;
+        runError = typeof error === 'string' ? error : error?.message || 'Unknown error';
+      });
+    }
+  });
+
+  onDestroy(() => {
+    cleanupResult?.();
+    cleanupComplete?.();
+    cleanupError?.();
+  });
+
+  async function runCovidMatching() {
+    if (!window.electronAPI) return;
+    isRunning = true;
+    runError = null;
+
+    try {
+      // Get the COVID database path
+      const dbPath = await window.electronAPI.getCovidDatabase();
+      if (!dbPath) {
+        runError = 'COVID antibody database (CoV-AbDab) not found. Please ensure it is placed in the application data directory.';
+        isRunning = false;
+        return;
+      }
+
+      const outputDir = $resultsState.outputDir;
+      if (!outputDir) {
+        runError = 'No output directory found. Run the main analysis first.';
+        isRunning = false;
+        return;
+      }
+
+      if (hasCohorts) {
+        // Run for each cohort sequentially.
+        // The onCovidMatchResult listener captures results into latestCovidResult.
+        // After each await returns (promise resolves on complete), we read it.
+        for (const cohort of $resultsState.cohortResults) {
+          latestCovidResult = null;
+
+          await window.electronAPI.runCovidMatchingAnalysis({
+            output_dir: cohort.outputDir,
+            cov_abdab_database_path: dbPath,
+            top_n_clones: 20
+          });
+
+          // The result event fires before the complete event (which resolves the await).
+          // So latestCovidResult should be populated by now.
+          const result = latestCovidResult;
+          if (result) {
+            resultsState.update(s => ({
+              ...s,
+              cohortResults: s.cohortResults.map(c =>
+                c.cohortType === cohort.cohortType
+                  ? { ...c, covidMatchData: result }
+                  : c
+              )
+            }));
+          }
+        }
+        // Set global covidMatchData to the disease cohort for the default view
+        const diseaseResult = $resultsState.cohortResults.find(c => c.cohortType === 'disease')?.covidMatchData;
+        if (diseaseResult) {
+          resultsState.update(s => ({ ...s, covidMatchData: diseaseResult }));
+        }
+      } else {
+        await window.electronAPI.runCovidMatchingAnalysis({
+          output_dir: outputDir,
+          cov_abdab_database_path: dbPath,
+          top_n_clones: 20
+        });
+      }
+    } catch (err: any) {
+      runError = err.message || 'Failed to run COVID matching';
+    } finally {
+      isRunning = false;
+    }
+  }
+
+  // ── Export ──
+  let isExporting = false;
+
+  async function exportCovidMatches() {
+    isExporting = true;
+    try {
+      const primary = hasCohorts ? diseaseCovid : $resultsState.covidMatchData;
+      if (!primary) { alert('No COVID matching data to export'); return; }
+
+      const wb = covidMatchWorkbook({
+        covidData: primary,
+        cohortName: hasCohorts ? diseaseName : undefined,
+        controlCovidData: hasCohorts ? controlCovid : undefined,
+        controlCohortName: hasCohorts ? controlName : undefined
+      });
+      await downloadXlsx(wb, 'covid_db_matches.xlsx');
+    } catch (err: any) {
+      alert(`Export failed: ${err.message || 'Unknown error'}`);
+    } finally {
+      isExporting = false;
+    }
+  }
 </script>
 
 <div class="covid-matching-container">
-  {#if !covidData}
+  {#if !hasAnyCovidData}
+    <!-- No data at all — show empty state with Run Now -->
     <div class="empty-state">
       <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor">
         <path d="M3 3v18M21 3v18M9 6l6 3-6 3 6 3-6 3" stroke-width="2"/>
       </svg>
       <h3>No COVID Database Matching Data</h3>
-      <p>Enable COVID database matching in the wizard to see results here.</p>
+      {#if isRunning}
+        <div class="run-status">
+          <div class="spinner"></div>
+          <p>Running COVID database matching...</p>
+        </div>
+      {:else}
+        <p>COVID database matching was not run during the initial analysis.</p>
+        {#if runError}
+          <p class="run-error">{runError}</p>
+        {/if}
+        {#if IS_ELECTRON}
+          <button class="run-now-btn" on:click={runCovidMatching} disabled={isRunning}>
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+              <polygon points="4,2 14,8 4,14" fill="currentColor"/>
+            </svg>
+            Run Now
+          </button>
+        {/if}
+      {/if}
     </div>
   {:else}
     <!-- Cohort selector (when cohorts present) -->
     {#if hasCohorts}
       <div class="covid-cohort-bar">
         <div class="covid-cohort-pills">
-          <span class="covid-cohort-label">Group:</span>
+          <span class="covid-cohort-label">Cohort:</span>
           {#each $resultsState.cohortResults as cohort (cohort.cohortType)}
-            {#if cohort.covidMatchData}
-              <button
-                class="covid-cohort-pill covid-pill-{cohort.cohortType}"
-                class:active={selectedCohort === cohort.cohortType}
-                on:click={() => switchCohort(cohort.cohortType)}
-              >
-                <span class="covid-pill-dot covid-dot-{cohort.cohortType}"></span>
-                {cohort.cohortName}
-              </button>
-            {/if}
+            <button
+              class="covid-cohort-pill covid-pill-{cohort.cohortType}"
+              class:active={selectedCohort === cohort.cohortType}
+              class:disabled={!cohort.covidMatchData}
+              on:click={() => { if (cohort.covidMatchData) switchCohort(cohort.cohortType); }}
+            >
+              <span class="covid-pill-dot covid-dot-{cohort.cohortType}"></span>
+              {cohort.cohortName}
+              {#if !cohort.covidMatchData}
+                <span class="pill-no-data">(no data)</span>
+              {/if}
+            </button>
           {/each}
         </div>
         {#if diseaseCovid && controlCovid}
@@ -83,6 +248,23 @@
         {/if}
       </div>
     {/if}
+
+    {#if covidData}
+    <!-- Header with export -->
+    <div class="covid-header-row">
+      <h3 class="covid-section-title">COVID-DB Matching Results</h3>
+      <button
+        class="export-view-btn"
+        on:click={exportCovidMatches}
+        disabled={isExporting}
+        title="Export COVID matching results to Excel"
+      >
+        <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
+          <path d="M8 2v8M5 7l3 3 3-3M2 12h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        {isExporting ? 'Exporting...' : 'Export'}
+      </button>
+    </div>
 
     <!-- Stats Dashboard -->
     <div class="stats-grid">
@@ -363,6 +545,16 @@
         {/if}
       </div>
     </div>
+    {:else}
+      <!-- Selected cohort has no data -->
+      <div class="empty-state">
+        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+          <path d="M3 3v18M21 3v18M9 6l6 3-6 3 6 3-6 3" stroke-width="2"/>
+        </svg>
+        <h3>No data for this cohort</h3>
+        <p>COVID database matching has not been run for this cohort yet.</p>
+      </div>
+    {/if}
   {/if}
 </div>
 
@@ -395,6 +587,87 @@
     margin: 0;
     color: var(--text-primary);
   }
+
+  .empty-state p {
+    margin: 0;
+    max-width: 400px;
+  }
+
+  .run-now-btn {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-5);
+    font-size: var(--text-sm);
+    font-weight: var(--font-semibold);
+    color: white;
+    background: var(--color-primary);
+    border: none;
+    border-radius: var(--border-radius-md);
+    cursor: pointer;
+    transition: all var(--transition-fast);
+    margin-top: var(--space-2);
+  }
+  .run-now-btn:hover { opacity: 0.9; }
+  .run-now-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .run-now-btn svg { flex-shrink: 0; }
+
+  .run-status {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--space-3);
+  }
+
+  .run-error {
+    color: var(--color-danger, #e53e3e);
+    font-size: var(--text-sm);
+  }
+
+  .spinner {
+    width: 24px;
+    height: 24px;
+    border: 3px solid var(--gray-200);
+    border-top-color: var(--color-primary);
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+  }
+
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+
+  .covid-header-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 var(--space-4);
+    margin-bottom: var(--space-3);
+  }
+  .covid-section-title {
+    margin: 0;
+    font-size: var(--text-lg);
+    font-weight: var(--font-semibold);
+    color: var(--text-primary);
+  }
+  .export-view-btn {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 8px;
+    font-size: 11px;
+    font-weight: var(--font-medium);
+    color: var(--text-secondary);
+    background: var(--surface-raised);
+    border: 1px solid var(--border-light);
+    border-radius: var(--border-radius-sm);
+    cursor: pointer;
+    transition: all var(--transition-fast);
+    white-space: nowrap;
+  }
+  .export-view-btn:hover { background: var(--gray-100); color: var(--text-primary); }
+  .export-view-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .export-view-btn svg { flex-shrink: 0; }
 
   .stats-grid {
     display: grid;
@@ -883,6 +1156,8 @@
     transition: all 0.15s;
   }
   .covid-cohort-pill.active { border-color: transparent; }
+  .covid-cohort-pill.disabled { opacity: 0.5; cursor: not-allowed; }
+  .pill-no-data { font-size: 0.65rem; opacity: 0.6; }
   .covid-pill-disease.active { background: #E3F2FD; color: #1565C0; }
   .covid-pill-control.active { background: #F5F5F5; color: #616161; }
   .covid-pill-dot { width: 6px; height: 6px; border-radius: 50%; }

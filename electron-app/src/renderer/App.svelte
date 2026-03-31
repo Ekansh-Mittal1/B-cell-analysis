@@ -6,7 +6,14 @@
   import Results from './routes/results/Results.svelte';
   import ThresholdDialog from './lib/components/ThresholdDialog.svelte';
   import SessionSidebar from './lib/components/SessionSidebar.svelte';
-  
+  import PasswordGate from './lib/components/PasswordGate.svelte';
+  import { loadDemoData } from './lib/demo-loader';
+
+  const IS_DEMO = typeof window !== 'undefined' && !window.electronAPI;
+  let demoAuthenticated = IS_DEMO ? sessionStorage.getItem('demo_authenticated') === '1' : false;
+  let demoLoading = false;
+  let demoError = '';
+
   let sessionSidebar: SessionSidebar;
   
   // Track fasta_dir from latest result so we can save it to session history
@@ -396,10 +403,35 @@
       // Disabled: auto-restore was racing with manual session selection and could load wrong session.
       // User can select a session from history sidebar instead.
       // tryRestoreFromStorage();
+    } else if (IS_DEMO && demoAuthenticated) {
+      // Demo mode: load pre-generated data
+      initDemo();
+    } else if (IS_DEMO) {
+      console.log('[App] Demo mode: waiting for authentication');
     } else {
       console.error('[App] electronAPI not available in onMount!');
     }
   });
+
+  async function initDemo() {
+    document.body.classList.add('demo-mode');
+    demoLoading = true;
+    demoError = '';
+    try {
+      await loadDemoData();
+      currentView.set('results');
+    } catch (e: any) {
+      demoError = e.message || 'Failed to load demo data';
+      console.error('[App] Demo load failed:', e);
+    } finally {
+      demoLoading = false;
+    }
+  }
+
+  function handleDemoAuth() {
+    demoAuthenticated = true;
+    initDemo();
+  }
   
   onDestroy(() => {
     cleanupFns.forEach(fn => fn());
@@ -446,6 +478,22 @@
 </script>
 
 <svelte:window on:click={handleClickOutside} />
+
+{#if IS_DEMO && !demoAuthenticated}
+  <PasswordGate on:authenticated={handleDemoAuth} />
+{:else if IS_DEMO && demoLoading}
+  <div class="demo-loading">
+    <h1 class="demo-loading-title">Clono</h1>
+    <p class="demo-loading-text">Loading demo data...</p>
+    <div class="demo-spinner"></div>
+  </div>
+{:else if IS_DEMO && demoError}
+  <div class="demo-loading">
+    <h1 class="demo-loading-title">Clono</h1>
+    <p class="demo-loading-error">{demoError}</p>
+    <button class="demo-retry" on:click={initDemo}>Retry</button>
+  </div>
+{:else}
 <div class="app-container">
   <!-- Header with drag region for macOS -->
   <header class="app-header">
@@ -477,8 +525,8 @@
             {/if}
           </div>
         {/if}
-        {#if $currentView === 'results'}
-          <button 
+        {#if $currentView === 'results' && !IS_DEMO}
+          <button
             class="btn btn-ghost btn-sm"
             on:click={() => { resetWizard(); currentView.set('wizard'); }}
           >
@@ -491,7 +539,9 @@
   
   <!-- Main content area with session sidebar -->
   <div class="app-body">
-    <SessionSidebar bind:this={sessionSidebar} />
+    {#if !IS_DEMO}
+      <SessionSidebar bind:this={sessionSidebar} />
+    {/if}
     <main class="app-content">
       {#if $currentView === 'wizard'}
         <Wizard />
@@ -511,6 +561,7 @@
     />
   {/if}
 </div>
+{/if}
 
 <style>
   :global(html, body) {
@@ -540,9 +591,15 @@
     display: flex;
     align-items: center;
     padding: 0 var(--space-6);
-    padding-left: 80px; /* Space for macOS traffic lights */
+    padding-left: 80px; /* Space for macOS traffic lights (ignored in web) */
     -webkit-app-region: drag;
     flex-shrink: 0;
+  }
+
+  /* In web/demo mode there are no traffic lights, so remove the extra left padding */
+  :global(body.demo-mode) .app-header {
+    padding-left: var(--space-6);
+    -webkit-app-region: auto;
   }
   
   .app-header > * {
@@ -644,6 +701,64 @@
     width: 100%;
     margin: 0;
     padding: 0;
+  }
+
+  /* Demo loading/error states */
+  .demo-loading {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100vh;
+    background: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%);
+    gap: 12px;
+  }
+
+  .demo-loading-title {
+    font-size: 28px;
+    font-weight: 700;
+    color: #1e293b;
+    margin: 0;
+  }
+
+  .demo-loading-text {
+    font-size: 15px;
+    color: #64748b;
+    margin: 0;
+  }
+
+  .demo-loading-error {
+    font-size: 15px;
+    color: #ef4444;
+    margin: 0;
+  }
+
+  .demo-spinner {
+    width: 32px;
+    height: 32px;
+    border: 3px solid #e2e8f0;
+    border-top-color: #4F46E5;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+
+  .demo-retry {
+    padding: 8px 20px;
+    background: #4F46E5;
+    color: white;
+    border: none;
+    border-radius: 8px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+
+  .demo-retry:hover {
+    background: #4338CA;
   }
 </style>
 

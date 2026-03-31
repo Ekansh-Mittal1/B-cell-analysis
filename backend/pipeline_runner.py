@@ -565,6 +565,14 @@ class PipelineRunner:
             return {}
         
         df = pd.read_table(db_pass_path)
+
+        # Filter for heavy chain (IGH) only — light chains (IGK/IGL) don't have
+        # meaningful clonal definitions or isotype switching
+        if 'locus' in df.columns:
+            total_before = len(df)
+            df = df[df['locus'] == 'IGH'].copy()
+            self.emit.log("info", f"Filtered for IGH locus: {total_before} -> {len(df)} sequences (dropped {total_before - len(df)} light chain)")
+
         self.emit.log("info", f"Splitting {len(df)} sequences from db-pass.tsv by timepoint")
         
         # Build numeric_id -> timepoint mapping
@@ -697,7 +705,17 @@ class PipelineRunner:
                 make_db(fmt7_path, self.database_j, self.database_v, self.database_d, self.combined_fasta)
             finally:
                 clonalityFunctions.outs_dir = original_outs_dir
-            
+
+            # Filter db-pass for heavy chain (IGH) only — clone definition and threshold
+            # calculation should only consider heavy chains
+            import pandas as pd
+            db_df = pd.read_table(db_pass_path)
+            if 'locus' in db_df.columns:
+                total_before = len(db_df)
+                db_df = db_df[db_df['locus'] == 'IGH']
+                db_df.to_csv(db_pass_path, sep='\t', index=False)
+                self.emit.log("info", f"Filtered db-pass for IGH locus: {total_before} -> {len(db_df)} sequences (dropped {total_before - len(db_df)} light chain)")
+
             script_path = os.path.join(self.backend_dir, 'scripts', 'calculateDistribution.R')
             
             # Per-timepoint mode
@@ -901,7 +919,7 @@ class PipelineRunner:
                 try:
                     db_pass_path = os.path.join(self.output_dir, "ig_out_data_db-pass.tsv")
                     clone_pass_path = os.path.join(self.output_dir, "ig_out_data_db-pass_clone-pass.tsv")
-                    
+
                     self.emit.log("info", f"Clone definition (single cohort): mode={self.clone_mode}, linkage={self.linkage_method}, threshold={threshold}")
                     define_clonality(db_pass_path, str(threshold), mode=self.clone_mode, link=self.linkage_method)
                     self._restore_d_gene_fields(db_pass_path, clone_pass_path)
@@ -1081,16 +1099,19 @@ class PipelineRunner:
             
             self.emit.log("info", f"Built {len(clone_profiles)} clone profiles for lineage matching")
             
-            # Match clones across timepoints using V+J+CDR3 AA similarity
+            # Match clones across timepoints using V+J+CDR3 AA hamming distance
+            # Consistent with DefineClones which uses normalized hamming distance
             def cdr3_similarity(s1, s2):
                 if not s1 or not s2:
                     return 0.0
-                max_len = max(len(s1), len(s2))
-                if max_len == 0:
+                # Require same length for hamming distance (different CDR3 lengths
+                # are very unlikely to be from the same rearrangement)
+                if len(s1) != len(s2):
+                    return 0.0
+                if len(s1) == 0:
                     return 1.0
-                # Simple Levenshtein-like: count matches at each position
-                matches = sum(1 for a, b in zip(s1, s2) if a == b)
-                return matches / max_len
+                mismatches = sum(1 for a, b in zip(s1, s2) if a != b)
+                return 1.0 - (mismatches / len(s1))
             
             # Union-Find for grouping matched clones
             parent = {}
@@ -1867,12 +1888,9 @@ class PipelineRunner:
                             if len(g) > 4:
                                 seq_record['j_locus'] = g[3] + g[2] + g[4:idx]
                     
-                    # Extract CDR3 info from blast CSV (for somatic mutations)
-                    cdr3_data = seq_data[seq_data['chain type'] == 'CDR3']
-                    if not cdr3_data.empty:
-                        row = cdr3_data.iloc[0]
-                        seq_record['somatic_mutations'] = int(row['alignment length']) if pd.notna(row['alignment length']) else None
-                    
+                    # somatic_mutations will be computed from sequence_alignment vs
+                    # germline_alignment in the clonality data below (real SHM count)
+
                     sequences.append(seq_record)
             
             # Load clonality data and CDR3 from the clonality TSV file
@@ -1919,7 +1937,18 @@ class PipelineRunner:
                     lineage_id = None
                     if 'lineage_id' in clone_df.columns and pd.notna(row.get('lineage_id')):
                         lineage_id = int(row['lineage_id'])
-                    
+
+                    # Compute real SHM: count mismatches between sequence_alignment and germline_alignment
+                    shm_count = None
+                    seq_align = str(row.get('sequence_alignment', '')) if pd.notna(row.get('sequence_alignment')) else ''
+                    germ_align = str(row.get('germline_alignment', '')) if pd.notna(row.get('germline_alignment')) else ''
+                    if seq_align and germ_align and len(seq_align) == len(germ_align):
+                        mismatches = 0
+                        for si, gi in zip(seq_align, germ_align):
+                            if si not in ('.', 'N') and gi not in ('.', 'N') and si != gi:
+                                mismatches += 1
+                        shm_count = mismatches
+
                     clone_data[seq_id] = {
                         'clone_id': int(clone_id) if clone_id is not None else None,
                         'clone_count': len(clone_df[clone_df['clone_id'] == clone_id]) if clone_id is not None else 0,
@@ -1929,6 +1958,7 @@ class PipelineRunner:
                         'dna_sequence': dna_seq,
                         'aa_sequence': aa_seq,
                         'c_call': c_call,
+                        'somatic_mutations': shm_count,
                         'lineage_id': lineage_id
                     }
             
@@ -2252,6 +2282,14 @@ class PipelineRunner:
                         )
                         
                         self.emit.result('covid_matches', data=results)
+                        # Persist to disk so session restore can reload it
+                        try:
+                            covid_json_path = os.path.join(self.output_dir, 'covid_matches.json')
+                            with open(covid_json_path, 'w') as f:
+                                json.dump(results, f)
+                            self.emit.log("info", f"COVID matches saved to {covid_json_path}")
+                        except Exception as save_err:
+                            self.emit.log("warn", f"Could not save covid_matches.json: {save_err}")
                         self.emit.log("info", f"COVID matching complete: {results['stats']['clones_with_high_matches']} clones with high matches")
                     else:
                         self.emit.log("warn", f"COVID matching enabled but files not found: clone_pass={os.path.exists(clone_pass_path)}, cov_abdab={os.path.exists(self.cov_abdab_path)}")
@@ -2513,7 +2551,16 @@ def run_covid_matching_analysis(config: dict, emit) -> bool:
         
         # Emit results
         emit.result('covid_matches', data=results)
-        
+
+        # Persist to disk so session restore can reload it
+        try:
+            covid_json_path = os.path.join(output_dir, 'covid_matches.json')
+            with open(covid_json_path, 'w') as f:
+                json.dump(results, f)
+            emit.log("info", f"COVID matches saved to {covid_json_path}")
+        except Exception as save_err:
+            emit.log("warn", f"Could not save covid_matches.json: {save_err}")
+
         stats = results.get('stats', {})
         emit.log("info", f"Analyzed {stats.get('total_clones_analyzed', 0)} clones")
         emit.log("info", f"Clones with high matches (≥90%): {stats.get('clones_with_high_matches', 0)}")

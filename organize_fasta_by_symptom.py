@@ -22,9 +22,10 @@ from pathlib import Path
 from collections import defaultdict
 
 # ──────────────────────── Configuration ────────────────────────
-FASTA_ROOT = Path("/Users/teichmann/Desktop/all fastas long covid study")
+FASTA_ROOT = Path("/Users/teichmann/Library/CloudStorage/GoogleDrive-jo.f.teichmann@gmail.com"
+                   "/Shared drives/Long_COVID_(PASC)/2_Raw_Data/10x_Genomics")
 SYMPTOM_EXCEL = Path("/Users/teichmann/Downloads/FullsymptomWithControl-082722 (1).xlsx")
-OUTPUT_DIR = Path("/Users/teichmann/Desktop/LongCovid_Symptom_FASTA")
+OUTPUT_DIR = Path("/Users/teichmann/Desktop/LongCovid_Symptom_FASTA_neu")
 
 TIMEPOINT_MAP = {"BL": "T1", "AC": "T2", "CV": "T3"}
 
@@ -136,10 +137,13 @@ for col in symptom_columns:
 # ──────────────────────── Step 2: Index all source files ────────────────────────
 print(f"\nIndexing source files from {FASTA_ROOT}...")
 
-# Index by file type: patient -> timepoint -> [paths]
+# Index by run subfolder so all file types for the same run stay together:
+#   run_idx[patient][timepoint][run_subfolder][file_type] = path
+# Path structure: .../<10x_Genomics_N>/<INCOV-TP>/<run_subfolder>/outs/<file>
+run_idx = defaultdict(lambda: defaultdict(lambda: defaultdict(dict)))
+
+# Keep the old flat indices for backward-compat with summary code
 all_contig_idx = defaultdict(lambda: defaultdict(list))
-filtered_contig_idx = defaultdict(lambda: defaultdict(list))
-filtered_csv_idx = defaultdict(lambda: defaultdict(list))
 
 for file_path in FASTA_ROOT.rglob("*"):
     if not file_path.is_file():
@@ -151,20 +155,30 @@ for file_path in FASTA_ROOT.rglob("*"):
     if not m:
         continue
     pid, tp = m.group(1), m.group(2)
+
+    # Extract run subfolder: the directory between <INCOV-TP>/ and /outs/
+    parts = file_path.parts
+    try:
+        tp_dir_idx = next(i for i, p in enumerate(parts) if re.match(rf"{re.escape(pid)}-{tp}$", p))
+        run_subfolder = parts[tp_dir_idx + 1]  # e.g. "F1_donor1", "F2_donor4"
+    except (StopIteration, IndexError):
+        run_subfolder = "default"
+
     if fname == "all_contig.fasta":
+        run_idx[pid][tp][run_subfolder]["all_contig"] = file_path
         all_contig_idx[pid][tp].append(file_path)
     elif fname == "filtered_contig.fasta":
-        filtered_contig_idx[pid][tp].append(file_path)
+        run_idx[pid][tp][run_subfolder]["filtered_contig"] = file_path
     elif fname == "filtered_contig_annotations.csv":
-        filtered_csv_idx[pid][tp].append(file_path)
+        run_idx[pid][tp][run_subfolder]["filtered_csv"] = file_path
 
-print(f"  all_contig.fasta:                {sum(len(tps) for tps in all_contig_idx.values())} patient-timepoints")
-print(f"  filtered_contig.fasta:           {sum(len(tps) for tps in filtered_contig_idx.values())} patient-timepoints")
-print(f"  filtered_contig_annotations.csv: {sum(len(tps) for tps in filtered_csv_idx.values())} patient-timepoints")
+n_pt = sum(len(tps) for tps in all_contig_idx.values())
+n_runs = sum(len(runs) for pt in run_idx.values() for runs in pt.values())
+print(f"  Patient-timepoints: {n_pt}, total runs: {n_runs}")
 
 # ──────────────────────── Step 3: Build all groups to process ────────────────────────
 
-# Add GI extended cohort
+# Add GI extended cohort (nausea or diarrhea)
 gi_extended = (
     (symptom_df["gastrointesti0l"] == 1) |
     (symptom_df["0usea"] == 1) |
@@ -172,6 +186,15 @@ gi_extended = (
 )
 gi_extended_patients = set(symptom_df[gi_extended]["SampleID"].tolist())
 symptom_patients["_GI_Extended"] = {"patients": gi_extended_patients, "display": "GI_NauseaOrDiarrhea"}
+
+# Add GI any-symptom cohort (nausea or diarrhea or abdominal pain)
+gi_any = (
+    (symptom_df["0usea"] == 1) |
+    (symptom_df["diarrhea"] == 1) |
+    (symptom_df["abdomi0l_pain"] == 1)
+)
+gi_any_patients = set(symptom_df[gi_any]["SampleID"].tolist())
+symptom_patients["_GI_Any"] = {"patients": gi_any_patients, "display": "GI_Any"}
 
 # Add Non-Long COVID controls
 non_lc_mask = (
@@ -188,13 +211,30 @@ for col in symptom_columns:
     info = symptom_patients[col]
     all_groups.append((info["display"], col, info["patients"]))
 all_groups.append(("GI_NauseaOrDiarrhea", "gastrointesti0l | 0usea | diarrhea", gi_extended_patients))
+all_groups.append(("GI_Any", "0usea | diarrhea | abdomi0l_pain", gi_any_patients))
 all_groups.append(("NonLongCovid", "LongCovid==0 / delete", non_lc_patients))
+
+# All NLC patients: everyone with FASTA data who is NOT explicitly LC in the symptom Excel
+lc_patients_in_excel = set(symptom_df[symptom_df["LongCovid"] == 1]["SampleID"].tolist())
+all_fasta_patients = set(all_contig_idx.keys())
+all_nlc_patients = all_fasta_patients - lc_patients_in_excel
+symptom_patients["_AllNLC"] = {"patients": all_nlc_patients, "display": "AllNLC"}
+all_groups.append(("AllNLC", "Not explicitly LC (all remaining)", all_nlc_patients))
+print(f"\n  AllNLC (not explicitly LC): {len(all_nlc_patients)} patients")
+
+# LC GI-negative: LC patients who do NOT have any GI symptoms
+lc_gi_negative_patients = lc_patients_in_excel - gi_extended_patients
+symptom_patients["_LC_GI_Negative"] = {"patients": lc_gi_negative_patients, "display": "LC_GI_Negative"}
+all_groups.append(("LC_GI_Negative", "LC without gastrointesti0l/nausea/diarrhea", lc_gi_negative_patients))
+print(f"  LC_GI_Negative: {len(lc_gi_negative_patients)} patients")
 
 # ──────────────────────── Step 4: Create output folders and write all files ────────────────────────
 print(f"\nCreating output in: {OUTPUT_DIR}")
 
 if OUTPUT_DIR.exists():
-    shutil.rmtree(OUTPUT_DIR)
+    print(f"  WARNING: {OUTPUT_DIR} already exists. Aborting to avoid overwriting.")
+    print(f"  Rename or delete the existing folder first.")
+    raise SystemExit(1)
 
 summary_rows = []
 
@@ -206,9 +246,15 @@ for display, col_label, patients in all_groups:
 
         copied_patients = []
         for patient_id in sorted(patients):
-            ac_files = sorted(all_contig_idx.get(patient_id, {}).get(tp_code, []))
-            fc_files = sorted(filtered_contig_idx.get(patient_id, {}).get(tp_code, []))
-            csv_files = sorted(filtered_csv_idx.get(patient_id, {}).get(tp_code, []))
+            runs = run_idx.get(patient_id, {}).get(tp_code, {})
+            if not runs:
+                continue
+
+            # Sort by run subfolder name so all file types get consistent ordering
+            sorted_runs = sorted(runs.keys())
+            ac_files = [runs[r]["all_contig"] for r in sorted_runs if "all_contig" in runs[r]]
+            fc_files = [runs[r]["filtered_contig"] for r in sorted_runs if "filtered_contig" in runs[r]]
+            csv_files = [runs[r]["filtered_csv"] for r in sorted_runs if "filtered_csv" in runs[r]]
 
             if not ac_files:
                 continue
@@ -269,6 +315,9 @@ for pid in sorted(all_patients_in_output):
         row[display] = 1 if pid in symptom_patients[col]["patients"] else 0
     row["NonLongCovid"] = 1 if pid in non_lc_patients else 0
     row["GI_NauseaOrDiarrhea"] = 1 if pid in gi_extended_patients else 0
+    row["GI_Any"] = 1 if pid in gi_any_patients else 0
+    row["AllNLC"] = 1 if pid in all_nlc_patients else 0
+    row["LC_GI_Negative"] = 1 if pid in lc_gi_negative_patients else 0
     patient_symptom_rows.append(row)
 
 patient_matrix_df = pd.DataFrame(patient_symptom_rows)
@@ -314,7 +363,7 @@ nonempty_folders = (summary_df["Patients_With_FASTA"] > 0).sum()
 print(f"\n{'=' * 60}")
 print(f"FINAL SUMMARY")
 print(f"{'=' * 60}")
-print(f"  Groups:             {len(all_groups)} (31 symptoms + GI_extended + NonLongCovid)")
+print(f"  Groups:             {len(all_groups)} (31 symptoms + GI_extended + GI_Any + NonLongCovid)")
 print(f"  Total folders:      {total_folders}")
 print(f"  Non-empty folders:  {nonempty_folders}")
 print(f"  Total patient-files:{total_files} (×3 files each: .fasta, _filtered.fasta, _filtered_annotations.csv)")

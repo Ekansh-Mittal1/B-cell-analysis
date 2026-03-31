@@ -3,6 +3,8 @@
   import { resultsState, type CohortResults } from '../../lib/stores/app';
   import type { TreeMetadata } from '../../lib/stores/app';
   import InteractiveTree from './InteractiveTree.svelte';
+  import { treeMetadataToCsv, downloadCsv } from '../../lib/utils/export-csv';
+  import { zipSync, strToU8 } from 'fflate';
   
   let selectedTreeIndex = 0;
   let selectedCohortType: string | null = null;
@@ -111,6 +113,138 @@
   function getTreeName(path: string, index: number): string {
     return getTreeNameFromMeta(path, activeTreeMetadata[index]);
   }
+
+  let isExportingTrees = false;
+
+  /** Collect all tree image paths grouped by cohort for zip export */
+  function collectAllTreePaths(): { cohortName: string; timepoint: string; path: string; metadata: TreeMetadata }[] {
+    const items: { cohortName: string; timepoint: string; path: string; metadata: TreeMetadata }[] = [];
+    if ($resultsState.cohortResults.length > 0) {
+      for (const cohort of $resultsState.cohortResults) {
+        for (let i = 0; i < cohort.treeImages.length; i++) {
+          items.push({
+            cohortName: cohort.cohortName,
+            timepoint: cohort.treeMetadata[i]?.timepoint ?? '',
+            path: cohort.treeImages[i],
+            metadata: cohort.treeMetadata[i]
+          });
+        }
+      }
+    } else {
+      for (let i = 0; i < $resultsState.treeImages.length; i++) {
+        items.push({
+          cohortName: '',
+          timepoint: $resultsState.treeMetadata[i]?.timepoint ?? '',
+          path: $resultsState.treeImages[i],
+          metadata: $resultsState.treeMetadata[i]
+        });
+      }
+    }
+    return items;
+  }
+
+  /** Build a safe folder/file name */
+  function safeName(s: string): string {
+    return s.replace(/[^a-zA-Z0-9_\-. ]/g, '_').replace(/\s+/g, '_');
+  }
+
+  async function exportTrees() {
+    isExportingTrees = true;
+    try {
+      const allTrees = collectAllTreePaths();
+      if (allTrees.length === 0) { alert('No trees to export'); return; }
+
+      // Generate metadata CSV
+      const csv = treeMetadataToCsv(
+        $resultsState.treeMetadata,
+        $resultsState.treeImages,
+        $resultsState.cohortResults
+      );
+
+      // Build zip contents
+      const zipFiles: Record<string, Uint8Array> = {};
+
+      // Add metadata CSV
+      zipFiles['tree_metadata.csv'] = strToU8(csv);
+
+      // Read each tree PNG and add to zip
+      for (const tree of allTrees) {
+        if (!tree.path) continue;
+        const filename = tree.path.split('/').pop() ?? '';
+        if (!filename) continue;
+
+        // Build subfolder path: cohort/timepoint/filename
+        const parts: string[] = [];
+        if (tree.cohortName) parts.push(safeName(tree.cohortName));
+        if (tree.timepoint) parts.push(safeName(tree.timepoint));
+        parts.push(filename);
+        const zipPath = parts.join('/');
+
+        try {
+          if (window.electronAPI) {
+            const result = await window.electronAPI.readImageBase64(tree.path);
+            if (result.success && result.data) {
+              // result.data is "data:image/png;base64,..." - strip prefix
+              const base64 = result.data.split(',')[1];
+              const binary = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
+              zipFiles[zipPath] = binary;
+            }
+          } else {
+            // Demo/web mode: fetch the image URL
+            const resp = await fetch(tree.path);
+            if (resp.ok) {
+              const buf = await resp.arrayBuffer();
+              zipFiles[zipPath] = new Uint8Array(buf);
+            }
+          }
+        } catch (e) {
+          console.warn(`Failed to read tree image: ${tree.path}`, e);
+        }
+      }
+
+      // Create zip
+      const zipped = zipSync(zipFiles, { level: 6 });
+
+      // Save zip
+      if (window.electronAPI) {
+        const filePath = await window.electronAPI.saveFile({
+          defaultPath: 'phylogenetic_trees.zip',
+          filters: [
+            { name: 'ZIP Files', extensions: ['zip'] },
+            { name: 'All Files', extensions: ['*'] }
+          ]
+        });
+        if (!filePath) return;
+        // Convert Uint8Array to base64 for IPC transfer (chunked to avoid call stack limits)
+        let base64 = '';
+        const chunkSize = 0x8000;
+        for (let i = 0; i < zipped.length; i += chunkSize) {
+          base64 += String.fromCharCode.apply(null, Array.from(zipped.subarray(i, i + chunkSize)));
+        }
+        base64 = btoa(base64);
+        const result = await window.electronAPI.writeBinaryFile(filePath, base64);
+        if (!result.success) {
+          alert(`Failed to save zip: ${result.error || 'Unknown error'}`);
+        }
+      } else {
+        // Browser download
+        const blob = new Blob([zipped], { type: 'application/zip' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'phylogenetic_trees.zip';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      }
+    } catch (err: any) {
+      console.error('Tree export error:', err);
+      alert(`Export failed: ${err.message || 'Unknown error'}`);
+    } finally {
+      isExportingTrees = false;
+    }
+  }
 </script>
 
 <div class="trees-container">
@@ -133,7 +267,20 @@
       <aside class="trees-sidebar">
         <div class="sidebar-header">
           <h3 class="sidebar-title">Generated Trees</h3>
-          <span class="tree-count">{hasCohorts ? $resultsState.cohortResults.reduce((s, c) => s + c.treeImages.length, 0) : $resultsState.treeImages.length}</span>
+          <div class="sidebar-header-actions">
+            <span class="tree-count">{hasCohorts ? $resultsState.cohortResults.reduce((s, c) => s + c.treeImages.length, 0) : $resultsState.treeImages.length}</span>
+            <button
+              class="export-view-btn"
+              on:click={exportTrees}
+              disabled={isExportingTrees}
+              title="Export tree images and metadata as ZIP"
+            >
+              <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
+                <path d="M8 2v8M5 7l3 3 3-3M2 12h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+              {isExportingTrees ? 'Zipping...' : 'Export ZIP'}
+            </button>
+          </div>
         </div>
         <div class="tree-list">
           {#if hasCohorts}
@@ -321,6 +468,29 @@
     padding: var(--space-4);
     border-bottom: 1px solid var(--border-light);
   }
+  .sidebar-header-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+  .export-view-btn {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 8px;
+    font-size: 11px;
+    font-weight: var(--font-medium);
+    color: var(--text-secondary);
+    background: var(--surface-raised);
+    border: 1px solid var(--border-light);
+    border-radius: var(--border-radius-sm);
+    cursor: pointer;
+    transition: all var(--transition-fast);
+    white-space: nowrap;
+  }
+  .export-view-btn:hover { background: var(--gray-100); color: var(--text-primary); }
+  .export-view-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .export-view-btn svg { flex-shrink: 0; }
   
   .sidebar-title {
     font-size: var(--text-sm);

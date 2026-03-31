@@ -268,11 +268,83 @@
 
   const COHORT_COLOR_DISEASE = '#1565C0';
   const COHORT_COLOR_CONTROL = '#757575';
+
+  // ── Export ─────────────────────────────────────────────
+  import { dashboardMetricsToCsv, dashboardPerPatientCsv, downloadCsv } from '../../lib/utils/export-csv';
+
+  let isExportingDashboard = false;
+  let isExportingPerPatient = false;
+
+  async function exportDashboard() {
+    isExportingDashboard = true;
+    try {
+      const csv = dashboardMetricsToCsv(
+        diseaseMetrics,
+        controlMetrics,
+        hasCohorts ? (diseaseCohort?.cohortName ?? 'Disease') : 'All Samples',
+        controlCohort?.cohortName ?? 'Control',
+        diseaseLongitudinal,
+        controlLongitudinal
+      );
+      await downloadCsv(csv, 'repertoire_dashboard_metrics.csv');
+    } catch (err: any) {
+      alert(`Export failed: ${err.message || 'Unknown error'}`);
+    } finally {
+      isExportingDashboard = false;
+    }
+  }
+
+  async function exportPerPatient() {
+    isExportingPerPatient = true;
+    try {
+      const csv = dashboardPerPatientCsv({
+        diseaseFileGroups: hasCohorts ? (diseaseCohort?.fileGroups ?? []) : singleFileGroups,
+        diseaseTimepointMapping: hasCohorts
+          ? (diseaseCohort?.timepointMapping ?? {})
+          : ($resultsState.timepointMapping ?? {}),
+        diseaseCohortName: hasCohorts ? (diseaseCohort?.cohortName ?? 'Disease') : 'All Samples',
+        controlFileGroups: hasCohorts ? (controlCohort?.fileGroups ?? undefined) : undefined,
+        controlTimepointMapping: hasCohorts ? (controlCohort?.timepointMapping ?? undefined) : undefined,
+        controlCohortName: hasCohorts ? (controlCohort?.cohortName ?? 'Control') : undefined
+      });
+      await downloadCsv(csv, 'repertoire_per_patient_metrics.csv');
+    } catch (err: any) {
+      alert(`Export failed: ${err.message || 'Unknown error'}`);
+    } finally {
+      isExportingPerPatient = false;
+    }
+  }
 </script>
 
 <div class="dashboard">
   <div class="dash-header">
     <h2 class="dash-title">Repertoire Dashboard</h2>
+    {#if diseaseMetrics.length > 0 || controlMetrics.length > 0}
+      <div class="dash-export-group">
+        <button
+          class="export-view-btn"
+          on:click={exportDashboard}
+          disabled={isExportingDashboard}
+          title="Export aggregated metrics (one row per timepoint)"
+        >
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+            <path d="M8 2v8M5 7l3 3 3-3M2 12h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          {isExportingDashboard ? '...' : 'Export Aggregated'}
+        </button>
+        <button
+          class="export-view-btn"
+          on:click={exportPerPatient}
+          disabled={isExportingPerPatient}
+          title="Export per-patient metrics (one row per patient × timepoint)"
+        >
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+            <path d="M8 2v8M5 7l3 3 3-3M2 12h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          {isExportingPerPatient ? '...' : 'Export Per-Patient'}
+        </button>
+      </div>
+    {/if}
   </div>
 
   {#if diseaseMetrics.length === 0 && controlMetrics.length === 0}
@@ -804,13 +876,40 @@
     overflow-y: auto;
     height: 100%;
   }
-  .dash-header { margin-bottom: var(--space-4); }
+  .dash-header {
+    margin-bottom: var(--space-4);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
   .dash-title {
     margin: 0;
     font-size: var(--text-xl);
     font-weight: var(--font-semibold);
     color: var(--text-primary);
   }
+  .dash-export-group {
+    display: flex;
+    gap: var(--space-2);
+  }
+  .export-view-btn {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    font-size: var(--text-xs);
+    font-weight: var(--font-medium);
+    color: var(--text-secondary);
+    background: var(--surface-raised);
+    border: 1px solid var(--border-light);
+    border-radius: var(--border-radius-md);
+    cursor: pointer;
+    transition: all var(--transition-fast);
+    white-space: nowrap;
+  }
+  .export-view-btn:hover { background: var(--gray-100); color: var(--text-primary); }
+  .export-view-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .export-view-btn svg { flex-shrink: 0; }
 
   /* ── Comparison summary cards ─── */
   .comparison-summary {

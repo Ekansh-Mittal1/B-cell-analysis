@@ -69,7 +69,7 @@ export class BackendRunner {
     // Prepare environment
     const env = {
       ...process.env,
-      PATH: `${this.options.binDir}:${process.env.PATH}`,
+      PATH: `${this.options.binDir}:/Users/teichmann/Library/Python/3.13/bin:${process.env.PATH}`,
       IGDATA: this.options.dataDir
     };
 
@@ -85,6 +85,18 @@ export class BackendRunner {
     // Capture reference so the exit handler only cleans up *this* process,
     // not a newer one that may have been spawned in the meantime (multi-cohort).
     const spawnedProcess = this.process;
+
+    // Track whether onComplete was already called via NDJSON 'complete' message,
+    // so the exit handler doesn't fire a duplicate (which would close the UI
+    // prematurely during multi-cohort runs).
+    let completeCalled = false;
+    const wrappedCallbacks: RunCallbacks = {
+      ...callbacks,
+      onComplete: (data: any) => {
+        completeCalled = true;
+        callbacks.onComplete(data);
+      }
+    };
 
     // Unref the process so it doesn't keep the Node process alive
     this.process.unref();
@@ -104,7 +116,7 @@ export class BackendRunner {
 
     // Handle each line of NDJSON output
     this.rl.on('line', (line: string) => {
-      this.handleMessage(line, callbacks);
+      this.handleMessage(line, wrappedCallbacks);
     });
 
     // Handle stderr for debugging
@@ -129,11 +141,13 @@ export class BackendRunner {
         spawnedRl.close();
         this.rl = null;
       }
-      
-      if (code !== 0 && code !== null) {
-        callbacks.onComplete({ 
-          success: false, 
-          error: `Process exited with code ${code}` 
+
+      // Only emit a failure-complete if onComplete wasn't already called via NDJSON.
+      // Otherwise the duplicate complete event would reset the UI mid multi-cohort run.
+      if (code !== 0 && code !== null && !completeCalled) {
+        callbacks.onComplete({
+          success: false,
+          error: `Process exited with code ${code}`
         });
       }
     });
@@ -264,7 +278,7 @@ export class BackendRunner {
     
     const env = {
       ...process.env,
-      PATH: `${this.options.binDir}:${process.env.PATH}`,
+      PATH: `${this.options.binDir}:/Users/teichmann/Library/Python/3.13/bin:${process.env.PATH}`,
       IGDATA: this.options.dataDir,
       PYTHONUNBUFFERED: '1'  // Ensure Python flushes stdout immediately
     };
@@ -328,7 +342,7 @@ export class BackendRunner {
     // Prepare environment
     const env = {
       ...process.env,
-      PATH: `${this.options.binDir}:${process.env.PATH}`,
+      PATH: `${this.options.binDir}:/Users/teichmann/Library/Python/3.13/bin:${process.env.PATH}`,
       IGDATA: this.options.dataDir
     };
 
@@ -409,6 +423,88 @@ export class BackendRunner {
     });
 
     console.log('[PublicClones] Sending config:', startMessage);
+    this.process.stdin.write(startMessage + '\n');
+  }
+
+  /**
+   * Run COVID database matching analysis on existing results.
+   */
+  runCovidMatchingAnalysis(
+    config: any,
+    handlers: { onResult: Function; onComplete: Function; onError: Function }
+  ): void {
+    const pipelineScript = path.join(this.options.backendDir, 'pipeline_runner.py');
+
+    const env = {
+      ...process.env,
+      PATH: `${this.options.binDir}:/Users/teichmann/Library/Python/3.13/bin:${process.env.PATH}`,
+      IGDATA: this.options.dataDir
+    };
+
+    this.process = spawn(this.options.pythonPath!, [pipelineScript], {
+      cwd: this.options.backendDir,
+      env,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      detached: true
+    });
+
+    if (!this.process.stdout || !this.process.stdin) {
+      handlers.onError('Failed to create process streams');
+      return;
+    }
+
+    this.rl = readline.createInterface({
+      input: this.process.stdout,
+      crlfDelay: Infinity
+    });
+
+    this.rl.on('line', (line: string) => {
+      if (!line || !line.trim()) return;
+      try {
+        const message = JSON.parse(line);
+        console.log('[CovidMatching] Message type:', message.type);
+        if (message.type === 'result' && message.artifact === 'covid_matches') {
+          handlers.onResult(message);
+        } else if (message.type === 'complete') {
+          handlers.onComplete(message);
+        } else if (message.type === 'log') {
+          console.log(`[CovidMatching ${message.level}]:`, message.message);
+        } else if (message.type === 'progress') {
+          console.log(`[CovidMatching Progress]: ${message.percent}% - ${message.message}`);
+        }
+      } catch (error) {
+        console.log('[CovidMatching raw]:', line);
+      }
+    });
+
+    this.process.stderr?.on('data', (data: Buffer) => {
+      console.error('[CovidMatching stderr]:', data.toString());
+    });
+
+    this.process.on('exit', (code: number | null) => {
+      console.log(`CovidMatching process exited with code ${code}`);
+      this.cleanup();
+      if (code !== 0 && code !== null) {
+        handlers.onError(`Process exited with code ${code}`);
+      }
+    });
+
+    this.process.on('error', (error: Error) => {
+      console.error('CovidMatching process error:', error);
+      handlers.onError(error.message);
+      this.cleanup();
+    });
+
+    const startMessage = JSON.stringify({
+      action: 'covid_matching',
+      config: {
+        output_dir: config.output_dir,
+        cov_abdab_database_path: config.cov_abdab_database_path,
+        top_n_clones: config.top_n_clones || 20
+      }
+    });
+
+    console.log('[CovidMatching] Sending config:', startMessage);
     this.process.stdin.write(startMessage + '\n');
   }
 

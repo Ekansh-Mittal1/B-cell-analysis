@@ -101,6 +101,33 @@ const api = {
   }): Promise<{ success: boolean; error?: string }> =>
     ipcRenderer.invoke('pipeline:runPublicCloneAnalysis', config),
 
+  // COVID matching analysis
+  runCovidMatchingAnalysis: (config: {
+    output_dir: string;
+    cov_abdab_database_path: string;
+    top_n_clones?: number;
+  }): Promise<{ success: boolean; error?: string }> =>
+    ipcRenderer.invoke('pipeline:runCovidMatchingAnalysis', config),
+
+  // COVID matching events
+  onCovidMatchResult: (callback: (data: any) => void) => {
+    const handler = (_: any, data: any) => callback(data);
+    ipcRenderer.on('pipeline:covidMatchResult', handler);
+    return () => ipcRenderer.removeListener('pipeline:covidMatchResult', handler);
+  },
+
+  onCovidMatchComplete: (callback: (data: any) => void) => {
+    const handler = (_: any, data: any) => callback(data);
+    ipcRenderer.on('pipeline:covidMatchComplete', handler);
+    return () => ipcRenderer.removeListener('pipeline:covidMatchComplete', handler);
+  },
+
+  onCovidMatchError: (callback: (data: any) => void) => {
+    const handler = (_: any, data: any) => callback(data);
+    ipcRenderer.on('pipeline:covidMatchError', handler);
+    return () => ipcRenderer.removeListener('pipeline:covidMatchError', handler);
+  },
+
   // Pipeline events
   onPipelineProgress: (callback: (data: { stage: string; percent: number; message: string }) => void) => {
     const handler = (_: any, data: any) => callback(data);
@@ -169,10 +196,13 @@ const api = {
   readFile: (filePath: string): Promise<FileResult> => 
     ipcRenderer.invoke('fs:readFile', filePath),
   
-  writeFile: (filePath: string, content: string): Promise<{ success: boolean; error?: string }> => 
+  writeFile: (filePath: string, content: string): Promise<{ success: boolean; error?: string }> =>
     ipcRenderer.invoke('fs:writeFile', filePath, content),
-  
-  copyFile: (sourcePath: string, destPath: string): Promise<{ success: boolean; error?: string }> => 
+
+  writeBinaryFile: (filePath: string, base64Data: string): Promise<{ success: boolean; error?: string }> =>
+    ipcRenderer.invoke('fs:writeBinaryFile', filePath, base64Data),
+
+  copyFile: (sourcePath: string, destPath: string): Promise<{ success: boolean; error?: string }> =>
     ipcRenderer.invoke('fs:copyFile', sourcePath, destPath),
   
   fileExists: (filePath: string): Promise<boolean> => 

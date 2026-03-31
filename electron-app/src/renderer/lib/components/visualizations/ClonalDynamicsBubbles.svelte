@@ -10,6 +10,7 @@
   export let colorMode: 'identity' | 'public_private' = 'identity';
   export let rankingMode: 'overall' | 'per_timepoint' = 'overall';
   export let publicCloneIds: Set<number> = new Set();
+  export let cohortLabel: string = '';
 
   let container: HTMLDivElement;
   let width = 600;
@@ -236,6 +237,14 @@
 
   function hideTooltip() {
     if (tooltipEl) tooltipEl.style.display = 'none';
+  }
+
+  import { exportHtmlAsPng } from '../../utils/export-figure';
+
+  export async function exportPng() {
+    if (!container) return;
+    const name = cohortLabel ? `clonal_dynamics_bubbles_${cohortLabel}.png` : 'clonal_dynamics_bubbles.png';
+    await exportHtmlAsPng(container, name);
   }
 </script>
 

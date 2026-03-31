@@ -17,6 +17,11 @@
   import { computeIsotypePerCloneTimepoint } from '../../lib/utils/public-clones';
   import type { IsotypeTileEntry } from '../../lib/utils/public-clones';
   import InteractiveTree from './InteractiveTree.svelte';
+  import {
+    sharedClonesWorkbook,
+    clonalDynamicsWorkbook,
+    downloadXlsx
+  } from '../../lib/utils/export-csv';
 
   const DYNAMICS_STATUSES: { value: ClonalStatus; label: string }[] = [
     { value: 'persistent', label: 'Persistent' },
@@ -290,6 +295,104 @@
     return id.replace('clone_', 'Clone ');
   }
 
+  function pct(count: number, total: number): string {
+    if (total === 0) return '0%';
+    return (count / total * 100).toFixed(1) + '%';
+  }
+
+  // ── Figure export refs ──
+  let diseaseHeatmapRef: ClonalDynamicsHeatmap;
+  let diseaseBubblesRef: ClonalDynamicsBubbles;
+  let diseaseIsotypeRef: ClonalDynamicsIsotypeTiles;
+  let controlHeatmapRef: ClonalDynamicsHeatmap;
+  let controlBubblesRef: ClonalDynamicsBubbles;
+  let controlIsotypeRef: ClonalDynamicsIsotypeTiles;
+  let singleHeatmapRef: ClonalDynamicsHeatmap;
+  let singleBubblesRef: ClonalDynamicsBubbles;
+  let singleIsotypeRef: ClonalDynamicsIsotypeTiles;
+
+  async function exportCurrentFigure(cohort: 'disease' | 'control' | 'single') {
+    try {
+      if (cohort === 'disease') {
+        if (dynamicsViewMode === 'heatmap') await diseaseHeatmapRef?.exportPng();
+        else if (dynamicsViewMode === 'bubbles') await diseaseBubblesRef?.exportPng();
+        else await diseaseIsotypeRef?.exportPng();
+      } else if (cohort === 'control') {
+        if (dynamicsViewMode === 'heatmap') await controlHeatmapRef?.exportPng();
+        else if (dynamicsViewMode === 'bubbles') await controlBubblesRef?.exportPng();
+        else await controlIsotypeRef?.exportPng();
+      } else {
+        if (dynamicsViewMode === 'heatmap') await singleHeatmapRef?.exportPng();
+        else if (dynamicsViewMode === 'bubbles') await singleBubblesRef?.exportPng();
+        else await singleIsotypeRef?.exportPng();
+      }
+    } catch (err: any) {
+      alert(`Figure export failed: ${err.message || 'Unknown error'}`);
+    }
+  }
+
+  // ── Export functions ──
+  let isExportingShared = false;
+  let isExportingDynamics = false;
+
+  async function exportSharedClones() {
+    isExportingShared = true;
+    try {
+      const wb = sharedClonesWorkbook({
+        fileGroups: $resultsState.fileGroups,
+        timepointMapping: $resultsState.timepointMapping,
+        cohortResults: $resultsState.cohortResults
+      });
+      if (!wb.SheetNames.length) { alert('No shared clones to export'); return; }
+      await downloadXlsx(wb, 'shared_clones.xlsx');
+    } catch (err: any) {
+      alert(`Export failed: ${err.message || 'Unknown error'}`);
+    } finally {
+      isExportingShared = false;
+    }
+  }
+
+  async function exportClonalDynamics() {
+    isExportingDynamics = true;
+    try {
+      const primaryDynamics = hasCohorts ? diseaseDynamicsData : dynamicsData;
+      const tpLabels = primaryDynamics?.timepointLabels ?? [];
+
+      // Recompute isotype tiles from ALL entries (not just topN) for the export
+      const allDiseaseTiles = (primaryDynamics && (hasCohorts ? diseaseCohort : true))
+        ? computeIsotypePerCloneTimepoint(
+            primaryDynamics.allEntries,
+            hasCohorts ? diseaseCohort!.fileGroups : activeFileGroups,
+            hasCohorts ? diseaseCohort!.timepointMapping : activeTimepointMapping,
+            tpLabels
+          )
+        : [];
+      const allControlTiles = (hasCohorts && controlDynamicsData && controlCohort)
+        ? computeIsotypePerCloneTimepoint(
+            controlDynamicsData.allEntries,
+            controlCohort.fileGroups, controlCohort.timepointMapping,
+            controlDynamicsData.timepointLabels
+          )
+        : undefined;
+
+      const wb = clonalDynamicsWorkbook({
+        dynamicsData: primaryDynamics,
+        cohortName: hasCohorts ? (diseaseCohort?.cohortName ?? 'Disease') : undefined,
+        controlDynamicsData: hasCohorts ? controlDynamicsData : undefined,
+        controlCohortName: hasCohorts ? (controlCohort?.cohortName ?? 'Control') : undefined,
+        isotypeTiles: allDiseaseTiles,
+        isotypeTimepointLabels: tpLabels,
+        controlIsotypeTiles: allControlTiles,
+        controlIsotypeTimepointLabels: hasCohorts ? (controlDynamicsData?.timepointLabels ?? []) : undefined
+      });
+      if (!wb) { alert('No clonal dynamics data to export'); return; }
+      await downloadXlsx(wb, 'clonal_dynamics.xlsx');
+    } catch (err: any) {
+      alert(`Export failed: ${err.message || 'Unknown error'}`);
+    } finally {
+      isExportingDynamics = false;
+    }
+  }
 
 </script>
 
@@ -326,23 +429,26 @@
           {#if $resultsState.publicClonesData}
             <span class="section-badge">{$resultsState.publicClonesData.stats.total_public_clones} found</span>
           {/if}
+          <button
+            class="section-export-btn"
+            on:click|stopPropagation={exportSharedClones}
+            disabled={isExportingShared}
+            title="Export shared clones (all timepoints, all cohorts) to CSV"
+          >
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
+              <path d="M8 2v8M5 7l3 3 3-3M2 12h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            {isExportingShared ? '...' : 'Export All'}
+          </button>
         </button>
 
         {#if sharedOpen}
           <div class="section-body">
-            <!-- Info banner -->
-            <div class="info-banner">
-              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" class="info-icon">
-                <circle cx="8" cy="8" r="7" stroke="currentColor" stroke-width="1.5"/>
-                <path d="M8 7v4M8 5.5v0" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-              </svg>
-              <span>
-                Shared clones are identified <strong>within each timepoint independently</strong>.
-                Clonality is defined per-timepoint by DefineClones &mdash; clones from different
-                timepoints have distinct ID spaces.
-                {#if hasTimepoints}Select a timepoint to view clones shared across patients.{/if}
-              </span>
-            </div>
+            {#if hasTimepoints}
+              <div class="info-banner-subtle">
+                Clones shared across 2+ patients within a timepoint. Select a timepoint below.
+              </div>
+            {/if}
 
             <!-- Cohort selector (when cohorts present) -->
             {#if hasCohorts}
@@ -542,26 +648,23 @@
             {#if dynamicsData}
               <span class="section-badge">{dynamicsData.stats.total} tracked</span>
             {/if}
+            {#if dynamicsData && dynamicsData.entries.length > 0}
+              <button
+                class="section-export-btn"
+                on:click|stopPropagation={exportClonalDynamics}
+                disabled={isExportingDynamics}
+                title="Export all clonal dynamics data (heatmap, bubbles, isotype) to CSV"
+              >
+                <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
+                  <path d="M8 2v8M5 7l3 3 3-3M2 12h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+                {isExportingDynamics ? '...' : 'Export All'}
+              </button>
+            {/if}
           </button>
 
           {#if dynamicsOpen}
             <div class="section-body">
-              <!-- Info banner -->
-              <div class="info-banner">
-                <svg width="13" height="13" viewBox="0 0 16 16" fill="none" class="info-icon">
-                  <circle cx="8" cy="8" r="7" stroke="currentColor" stroke-width="1.5"/>
-                  <path d="M8 7v4M8 5.5v0" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-                </svg>
-                <span>
-                  Tracks clones/lineages across timepoints using
-                  {#if dynamicsData?.entries.some(e => e.lineageId != null)}
-                    <strong>lineage IDs</strong> (cross-timepoint lineage grouping).
-                  {:else}
-                    <strong>clone IDs</strong> (per-timepoint clonality).
-                  {/if}
-                  Clones are classified by their expansion dynamics over time.
-                </span>
-              </div>
 
               {#if dynamicsData && dynamicsData.entries.length > 0}
                 <!-- Status filter pills + Top-N control -->
@@ -650,11 +753,11 @@
                 <!-- Stats (only shown when no cohorts; cohort stats are inline with heatmaps below) -->
                 {#if !(hasCohorts && diseaseDynamicsData && controlDynamicsData)}
                   <div class="dynamics-stats">
-                    <div class="dstat persistent"><span class="dstat-val">{dynamicsData.stats.persistent}</span><span class="dstat-label">Persistent</span></div>
-                    <div class="dstat expanding"><span class="dstat-val">{dynamicsData.stats.expanding}</span><span class="dstat-label">Expanding</span></div>
-                    <div class="dstat contracting"><span class="dstat-val">{dynamicsData.stats.contracting}</span><span class="dstat-label">Contracting</span></div>
-                    <div class="dstat disappeared"><span class="dstat-val">{dynamicsData.stats.disappeared}</span><span class="dstat-label">Disappeared</span></div>
-                    <div class="dstat late-emerging"><span class="dstat-val">{dynamicsData.stats.lateEmerging}</span><span class="dstat-label">Late Emerging</span></div>
+                    <div class="dstat persistent"><span class="dstat-val">{dynamicsData.stats.persistent}</span><span class="dstat-pct">{pct(dynamicsData.stats.persistent, dynamicsData.stats.total)}</span><span class="dstat-label">Persistent</span></div>
+                    <div class="dstat expanding"><span class="dstat-val">{dynamicsData.stats.expanding}</span><span class="dstat-pct">{pct(dynamicsData.stats.expanding, dynamicsData.stats.total)}</span><span class="dstat-label">Expanding</span></div>
+                    <div class="dstat contracting"><span class="dstat-val">{dynamicsData.stats.contracting}</span><span class="dstat-pct">{pct(dynamicsData.stats.contracting, dynamicsData.stats.total)}</span><span class="dstat-label">Contracting</span></div>
+                    <div class="dstat disappeared"><span class="dstat-val">{dynamicsData.stats.disappeared}</span><span class="dstat-pct">{pct(dynamicsData.stats.disappeared, dynamicsData.stats.total)}</span><span class="dstat-label">Disappeared</span></div>
+                    <div class="dstat late-emerging"><span class="dstat-val">{dynamicsData.stats.lateEmerging}</span><span class="dstat-pct">{pct(dynamicsData.stats.lateEmerging, dynamicsData.stats.total)}</span><span class="dstat-label">Late Emerging</span></div>
                   </div>
                 {/if}
 
@@ -664,26 +767,35 @@
                     <!-- Left: side-by-side heatmaps/bubbles with inline stats -->
                     <div class="dynamics-cohort-heatmaps">
                       <div class="dynamics-cohort-hm">
-                        <div class="dynamics-dual-label cohort-label-disease">{diseaseCohort?.cohortName || 'Disease'}</div>
+                        <div class="dynamics-dual-label cohort-label-disease">
+                          {diseaseCohort?.cohortName || 'Disease'}
+                          <button class="fig-export-btn" on:click={() => exportCurrentFigure('disease')} title="Export figure as PNG">
+                            <svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M8 2v8M5 7l3 3 3-3M2 12h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                            PNG
+                          </button>
+                        </div>
                         <div class="dynamics-inline-stats">
-                          <div class="dstat-inline persistent"><span class="dstat-val">{diseaseDynamicsData.stats.persistent}</span><span class="dstat-label">Pers.</span></div>
-                          <div class="dstat-inline expanding"><span class="dstat-val">{diseaseDynamicsData.stats.expanding}</span><span class="dstat-label">Exp.</span></div>
-                          <div class="dstat-inline contracting"><span class="dstat-val">{diseaseDynamicsData.stats.contracting}</span><span class="dstat-label">Contr.</span></div>
-                          <div class="dstat-inline disappeared"><span class="dstat-val">{diseaseDynamicsData.stats.disappeared}</span><span class="dstat-label">Disapp.</span></div>
-                          <div class="dstat-inline late-emerging"><span class="dstat-val">{diseaseDynamicsData.stats.lateEmerging}</span><span class="dstat-label">Late</span></div>
+                          <div class="dstat-inline persistent"><span class="dstat-val">{diseaseDynamicsData.stats.persistent} <span class="dstat-pct-inline">({pct(diseaseDynamicsData.stats.persistent, diseaseDynamicsData.stats.total)})</span></span><span class="dstat-label">Pers.</span></div>
+                          <div class="dstat-inline expanding"><span class="dstat-val">{diseaseDynamicsData.stats.expanding} <span class="dstat-pct-inline">({pct(diseaseDynamicsData.stats.expanding, diseaseDynamicsData.stats.total)})</span></span><span class="dstat-label">Exp.</span></div>
+                          <div class="dstat-inline contracting"><span class="dstat-val">{diseaseDynamicsData.stats.contracting} <span class="dstat-pct-inline">({pct(diseaseDynamicsData.stats.contracting, diseaseDynamicsData.stats.total)})</span></span><span class="dstat-label">Contr.</span></div>
+                          <div class="dstat-inline disappeared"><span class="dstat-val">{diseaseDynamicsData.stats.disappeared} <span class="dstat-pct-inline">({pct(diseaseDynamicsData.stats.disappeared, diseaseDynamicsData.stats.total)})</span></span><span class="dstat-label">Disapp.</span></div>
+                          <div class="dstat-inline late-emerging"><span class="dstat-val">{diseaseDynamicsData.stats.lateEmerging} <span class="dstat-pct-inline">({pct(diseaseDynamicsData.stats.lateEmerging, diseaseDynamicsData.stats.total)})</span></span><span class="dstat-label">Late</span></div>
                         </div>
                         {#if dynamicsViewMode === 'heatmap'}
                           <div style="max-height: calc(100vh - 420px); overflow-y: auto; overflow-x: auto; border: 1px solid var(--border-light); border-radius: 8px;">
                             <ClonalDynamicsHeatmap
+                              bind:this={diseaseHeatmapRef}
                               entries={diseaseDynamicsData.entries.filter(e => activeStatuses[e.status])}
                               timepointLabels={diseaseDynamicsData.timepointLabels}
                               timepointTotals={diseaseDynamicsData.timepointTotals}
                               onCloneClick={handleDiseaseCloneClick}
+                              cohortLabel={diseaseCohort?.cohortName || 'Disease'}
                             />
                           </div>
                         {:else if dynamicsViewMode === 'bubbles'}
                           <div style="max-height: calc(100vh - 420px); overflow-y: auto; border: 1px solid var(--border-light); border-radius: 8px; padding: 8px;">
                             <ClonalDynamicsBubbles
+                              bind:this={diseaseBubblesRef}
                               entries={diseaseDynamicsData.entries.filter(e => activeStatuses[e.status])}
                               timepointLabels={diseaseDynamicsData.timepointLabels}
                               timepointTotals={diseaseDynamicsData.timepointTotals}
@@ -691,40 +803,52 @@
                               colorMode={bubbleColorMode}
                               rankingMode={bubbleRankingMode}
                               publicCloneIds={diseasePublicCloneIds}
+                              cohortLabel={diseaseCohort?.cohortName || 'Disease'}
                             />
                           </div>
                         {:else}
                           <div style="max-height: calc(100vh - 420px); overflow-y: auto; overflow-x: auto; border: 1px solid var(--border-light); border-radius: 8px; padding: 8px;">
                             <ClonalDynamicsIsotypeTiles
+                              bind:this={diseaseIsotypeRef}
                               tileEntries={diseaseIsotypeTiles}
                               timepointLabels={diseaseDynamicsData.timepointLabels}
                               onCloneClick={handleDiseaseCloneClick}
                               dynamicsEntries={diseaseDynamicsData.entries.filter(e => activeStatuses[e.status])}
+                              cohortLabel={diseaseCohort?.cohortName || 'Disease'}
                             />
                           </div>
                         {/if}
                       </div>
                       <div class="dynamics-cohort-hm">
-                        <div class="dynamics-dual-label cohort-label-control">{controlCohort?.cohortName || 'Control'}</div>
+                        <div class="dynamics-dual-label cohort-label-control">
+                          {controlCohort?.cohortName || 'Control'}
+                          <button class="fig-export-btn" on:click={() => exportCurrentFigure('control')} title="Export figure as PNG">
+                            <svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M8 2v8M5 7l3 3 3-3M2 12h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                            PNG
+                          </button>
+                        </div>
                         <div class="dynamics-inline-stats">
-                          <div class="dstat-inline persistent"><span class="dstat-val">{controlDynamicsData.stats.persistent}</span><span class="dstat-label">Pers.</span></div>
-                          <div class="dstat-inline expanding"><span class="dstat-val">{controlDynamicsData.stats.expanding}</span><span class="dstat-label">Exp.</span></div>
-                          <div class="dstat-inline contracting"><span class="dstat-val">{controlDynamicsData.stats.contracting}</span><span class="dstat-label">Contr.</span></div>
-                          <div class="dstat-inline disappeared"><span class="dstat-val">{controlDynamicsData.stats.disappeared}</span><span class="dstat-label">Disapp.</span></div>
-                          <div class="dstat-inline late-emerging"><span class="dstat-val">{controlDynamicsData.stats.lateEmerging}</span><span class="dstat-label">Late</span></div>
+                          <div class="dstat-inline persistent"><span class="dstat-val">{controlDynamicsData.stats.persistent} <span class="dstat-pct-inline">({pct(controlDynamicsData.stats.persistent, controlDynamicsData.stats.total)})</span></span><span class="dstat-label">Pers.</span></div>
+                          <div class="dstat-inline expanding"><span class="dstat-val">{controlDynamicsData.stats.expanding} <span class="dstat-pct-inline">({pct(controlDynamicsData.stats.expanding, controlDynamicsData.stats.total)})</span></span><span class="dstat-label">Exp.</span></div>
+                          <div class="dstat-inline contracting"><span class="dstat-val">{controlDynamicsData.stats.contracting} <span class="dstat-pct-inline">({pct(controlDynamicsData.stats.contracting, controlDynamicsData.stats.total)})</span></span><span class="dstat-label">Contr.</span></div>
+                          <div class="dstat-inline disappeared"><span class="dstat-val">{controlDynamicsData.stats.disappeared} <span class="dstat-pct-inline">({pct(controlDynamicsData.stats.disappeared, controlDynamicsData.stats.total)})</span></span><span class="dstat-label">Disapp.</span></div>
+                          <div class="dstat-inline late-emerging"><span class="dstat-val">{controlDynamicsData.stats.lateEmerging} <span class="dstat-pct-inline">({pct(controlDynamicsData.stats.lateEmerging, controlDynamicsData.stats.total)})</span></span><span class="dstat-label">Late</span></div>
                         </div>
                         {#if dynamicsViewMode === 'heatmap'}
                           <div style="max-height: calc(100vh - 420px); overflow-y: auto; overflow-x: auto; border: 1px solid var(--border-light); border-radius: 8px;">
                             <ClonalDynamicsHeatmap
+                              bind:this={controlHeatmapRef}
                               entries={controlDynamicsData.entries.filter(e => activeStatuses[e.status])}
                               timepointLabels={controlDynamicsData.timepointLabels}
                               timepointTotals={controlDynamicsData.timepointTotals}
                               onCloneClick={handleControlCloneClick}
+                              cohortLabel={controlCohort?.cohortName || 'Control'}
                             />
                           </div>
                         {:else if dynamicsViewMode === 'bubbles'}
                           <div style="max-height: calc(100vh - 420px); overflow-y: auto; border: 1px solid var(--border-light); border-radius: 8px; padding: 8px;">
                             <ClonalDynamicsBubbles
+                              bind:this={controlBubblesRef}
                               entries={controlDynamicsData.entries.filter(e => activeStatuses[e.status])}
                               timepointLabels={controlDynamicsData.timepointLabels}
                               timepointTotals={controlDynamicsData.timepointTotals}
@@ -732,15 +856,18 @@
                               colorMode={bubbleColorMode}
                               rankingMode={bubbleRankingMode}
                               publicCloneIds={controlPublicCloneIds}
+                              cohortLabel={controlCohort?.cohortName || 'Control'}
                             />
                           </div>
                         {:else}
                           <div style="max-height: calc(100vh - 420px); overflow-y: auto; overflow-x: auto; border: 1px solid var(--border-light); border-radius: 8px; padding: 8px;">
                             <ClonalDynamicsIsotypeTiles
+                              bind:this={controlIsotypeRef}
                               tileEntries={controlIsotypeTiles}
                               timepointLabels={controlDynamicsData.timepointLabels}
                               onCloneClick={handleControlCloneClick}
                               dynamicsEntries={controlDynamicsData.entries.filter(e => activeStatuses[e.status])}
+                              cohortLabel={controlCohort?.cohortName || 'Control'}
                             />
                           </div>
                         {/if}
@@ -815,8 +942,15 @@
                   <!-- Original 3-column layout: Heatmap/Bubbles/Isotype | Tree | Detail -->
                   <div class="dynamics-split">
                     <div class="dynamics-heatmap-section">
+                      <div class="dynamics-fig-export-row">
+                        <button class="fig-export-btn" on:click={() => exportCurrentFigure('single')} title="Export figure as PNG">
+                          <svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M8 2v8M5 7l3 3 3-3M2 12h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                          Export PNG
+                        </button>
+                      </div>
                       {#if dynamicsViewMode === 'heatmap'}
                         <ClonalDynamicsHeatmap
+                          bind:this={singleHeatmapRef}
                           entries={filteredDynamicsEntries}
                           timepointLabels={dynamicsData.timepointLabels}
                           timepointTotals={dynamicsData.timepointTotals}
@@ -825,6 +959,7 @@
                       {:else if dynamicsViewMode === 'bubbles'}
                         <div style="padding: 8px;">
                           <ClonalDynamicsBubbles
+                            bind:this={singleBubblesRef}
                             entries={filteredDynamicsEntries}
                             timepointLabels={dynamicsData.timepointLabels}
                             timepointTotals={dynamicsData.timepointTotals}
@@ -837,6 +972,7 @@
                       {:else}
                         <div style="padding: 8px;">
                           <ClonalDynamicsIsotypeTiles
+                            bind:this={singleIsotypeRef}
                             tileEntries={singleIsotypeTiles}
                             timepointLabels={dynamicsData.timepointLabels}
                             onCloneClick={handleDynamicsCloneClick}
@@ -1026,6 +1162,27 @@
   }
   .section-header:hover { background: var(--gray-50); }
 
+  .section-export-btn {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 8px;
+    margin-left: auto;
+    font-size: 11px;
+    font-weight: var(--font-medium);
+    color: var(--text-secondary);
+    background: var(--surface-raised);
+    border: 1px solid var(--border-light);
+    border-radius: var(--border-radius-sm);
+    cursor: pointer;
+    transition: all var(--transition-fast);
+    white-space: nowrap;
+    font-family: var(--font-sans);
+  }
+  .section-export-btn:hover { background: var(--gray-100); color: var(--text-primary); }
+  .section-export-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .section-export-btn svg { flex-shrink: 0; }
+
   .section-chevron {
     display: flex;
     align-items: center;
@@ -1077,6 +1234,12 @@
     font-size: var(--text-sm);
     color: var(--text-secondary);
     line-height: var(--leading-relaxed);
+  }
+  .info-banner-subtle {
+    font-size: var(--text-xs);
+    color: var(--text-tertiary);
+    padding: 0 var(--space-1);
+    margin-bottom: var(--space-1);
   }
   .info-icon {
     flex-shrink: 0;
@@ -1402,6 +1565,7 @@
     min-width: 100px;
   }
   .dstat-val { font-size: var(--text-2xl); font-weight: var(--font-bold); }
+  .dstat-pct { font-size: var(--text-xs); font-weight: var(--font-medium); opacity: 0.7; }
   .dstat-label { font-size: var(--text-xs); font-weight: var(--font-medium); margin-top: 2px; }
 
   .dstat.persistent { background: #E3F2FD; }
@@ -1818,6 +1982,36 @@
     text-transform: uppercase;
     letter-spacing: 0.03em;
     opacity: 0.8;
+  }
+  .dstat-pct-inline {
+    font-weight: var(--font-medium);
+    font-size: 0.85em;
+    opacity: 0.7;
+  }
+
+  .fig-export-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 1px 6px;
+    font-size: 10px;
+    font-weight: var(--font-medium);
+    color: var(--text-tertiary);
+    background: var(--surface-raised);
+    border: 1px solid var(--border-light);
+    border-radius: var(--border-radius-sm);
+    cursor: pointer;
+    transition: all var(--transition-fast);
+    white-space: nowrap;
+    margin-left: auto;
+  }
+  .fig-export-btn:hover { background: var(--gray-100); color: var(--text-primary); }
+  .fig-export-btn svg { flex-shrink: 0; }
+
+  .dynamics-fig-export-row {
+    display: flex;
+    justify-content: flex-end;
+    padding: 0 4px 4px;
   }
   .dstat-inline.persistent { background: #E3F2FD; color: #1565C0; }
   .dstat-inline.expanding { background: #E8F5E9; color: #2E7D32; }

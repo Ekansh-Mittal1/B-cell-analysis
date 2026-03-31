@@ -36,16 +36,30 @@
   
   async function loadNewickFile() {
     try {
-      const result: any = await window.electronAPI.readFile(newickPath);
-      
-      if (result.success && result.data) {
-        newickString = result.data;
-        console.log('[InteractiveTree] Newick loaded, length:', newickString.length);
-        isLoading = false; // Allow containerDiv to render
+      if (window.electronAPI) {
+        const result: any = await window.electronAPI.readFile(newickPath);
+        if (result.success && result.data) {
+          newickString = result.data;
+        } else {
+          error = `Failed to read Newick file: ${result.error || 'Unknown error'}`;
+          isLoading = false;
+          return;
+        }
       } else {
-        error = `Failed to read Newick file: ${result.error || 'Unknown error'}`;
-        isLoading = false;
+        // Demo mode: load from bundled demo data
+        const { getDemoData } = await import('../../lib/demo-loader');
+        const demoData = getDemoData();
+        const nw = demoData?.newick_trees?.[newickPath];
+        if (nw) {
+          newickString = nw;
+        } else {
+          error = 'Tree data not available in demo';
+          isLoading = false;
+          return;
+        }
       }
+      console.log('[InteractiveTree] Newick loaded, length:', newickString.length);
+      isLoading = false;
     } catch (e: any) {
       error = e.message || 'Unknown error loading tree';
       isLoading = false;

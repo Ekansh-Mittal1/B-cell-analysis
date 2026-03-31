@@ -7,9 +7,13 @@
   import PhylogeneticTrees from './PhylogeneticTrees.svelte';
   import PublicClones from './PublicClones.svelte';
   import CovidMatching from './CovidMatching.svelte';
-  
-  type Tab = 'browser' | 'dl-browser' | 'dashboard' | 'trees' | 'public-clones' | 'covid-matching';
-  let activeTab: Tab = 'browser';
+  import AntibodyMatching from './AntibodyMatching.svelte';
+  import AntigenBindingPrediction from './AntigenBindingPrediction.svelte';
+
+  const IS_DEMO = typeof window !== 'undefined' && !window.electronAPI;
+
+  type Tab = 'browser' | 'dl-browser' | 'dashboard' | 'trees' | 'public-clones' | 'covid-matching' | 'antigen-binding';
+  let activeTab: Tab = IS_DEMO ? 'dashboard' : 'browser';
   let isExporting = false;
 
   // Function to escape CSV values
@@ -98,11 +102,6 @@
 
   // Export all sequences to CSV
   async function exportToCsv() {
-    if (!window.electronAPI) {
-      alert('Electron API not available');
-      return;
-    }
-
     if ($resultsState.sequences.length === 0) {
       alert('No sequences to export');
       return;
@@ -111,31 +110,40 @@
     isExporting = true;
 
     try {
-      // Open save dialog
-      const filePath = await window.electronAPI.saveFile({
-        defaultPath: 'bcr_analysis_results.csv',
-        filters: [
-          { name: 'CSV Files', extensions: ['csv'] },
-          { name: 'All Files', extensions: ['*'] }
-        ]
-      });
-
-      if (!filePath) {
-        // User cancelled
-        isExporting = false;
-        return;
-      }
-
-      // Convert sequences to CSV
       const csvContent = sequencesToCsv($resultsState.sequences);
 
-      // Write file
-      const result = await window.electronAPI.writeFile(filePath, csvContent);
+      if (window.electronAPI) {
+        // Electron: use native save dialog
+        const filePath = await window.electronAPI.saveFile({
+          defaultPath: 'bcr_analysis_results.csv',
+          filters: [
+            { name: 'CSV Files', extensions: ['csv'] },
+            { name: 'All Files', extensions: ['*'] }
+          ]
+        });
 
-      if (result.success) {
-        alert(`Successfully exported ${$resultsState.sequences.length} sequences to ${filePath}`);
+        if (!filePath) {
+          isExporting = false;
+          return;
+        }
+
+        const result = await window.electronAPI.writeFile(filePath, csvContent);
+        if (result.success) {
+          alert(`Successfully exported ${$resultsState.sequences.length} sequences to ${filePath}`);
+        } else {
+          alert(`Failed to export: ${result.error || 'Unknown error'}`);
+        }
       } else {
-        alert(`Failed to export: ${result.error || 'Unknown error'}`);
+        // Web/demo mode: browser download
+        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'bcr_analysis_results.csv';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
       }
     } catch (error: any) {
       console.error('Export error:', error);
@@ -157,18 +165,20 @@
     </div>
     
     <div class="header-actions">
-      <button 
-        class="btn btn-primary export-btn"
-        on:click={exportToCsv}
-        disabled={isExporting || $resultsState.sequences.length === 0}
-        title="Export all sequences to CSV"
-      >
-        <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-          <path d="M8 2v8M5 7l3 3 3-3M2 12h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-        </svg>
-        {isExporting ? 'Exporting...' : 'Export to CSV'}
-      </button>
-      
+      {#if activeTab === 'browser' || activeTab === 'dl-browser'}
+        <button
+          class="btn btn-primary export-btn"
+          on:click={exportToCsv}
+          disabled={isExporting || $resultsState.sequences.length === 0}
+          title="Export all sequences to CSV"
+        >
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+            <path d="M8 2v8M5 7l3 3 3-3M2 12h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          {isExporting ? 'Exporting...' : 'Export Sequences'}
+        </button>
+      {/if}
+
       <div class="tabs">
       <button 
         class="tab" 
@@ -250,13 +260,27 @@
         <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
           <path d="M2 2v12M14 2v12M6 4l4 2-4 2 4 2-4 2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
         </svg>
-        COVID-DB Matching
+        {IS_DEMO ? 'Antibody Matching' : 'COVID-DB Matching'}
         {#if $resultsState.covidMatchData}
           <span class="tab-badge">
             {$resultsState.covidMatchData.stats.clones_with_high_matches}
           </span>
         {/if}
       </button>
+      {#if IS_DEMO}
+      <button
+        class="tab"
+        class:active={activeTab === 'antigen-binding'}
+        on:click={() => activeTab = 'antigen-binding'}
+      >
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+          <path d="M8 9v5M5 3l3 6 3-6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+          <circle cx="4" cy="2.5" r="1.5" stroke="currentColor" stroke-width="1.2" fill="none"/>
+          <circle cx="12" cy="2.5" r="1.5" stroke="currentColor" stroke-width="1.2" fill="none"/>
+        </svg>
+        Antigen Binding
+      </button>
+      {/if}
       </div>
     </div>
   </div>
@@ -319,7 +343,13 @@
     {:else if activeTab === 'public-clones'}
       <PublicClones />
     {:else if activeTab === 'covid-matching'}
-      <CovidMatching />
+      {#if IS_DEMO}
+        <AntibodyMatching />
+      {:else}
+        <CovidMatching />
+      {/if}
+    {:else if activeTab === 'antigen-binding'}
+      <AntigenBindingPrediction />
     {/if}
   </div>
 </div>

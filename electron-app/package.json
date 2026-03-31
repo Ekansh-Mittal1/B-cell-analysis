@@ -12,6 +12,8 @@
     "build:main": "tsc -p tsconfig.main.json",
     "build:preload": "tsc -p tsconfig.preload.json",
     "build:renderer": "vite build",
+    "build:web": "vite build",
+    "preview:web": "vite build && npx serve dist/renderer",
     "start": "electron .",
     "preview": "npm run build && electron .",
     "package": "npm run build && electron-builder",
@@ -21,7 +23,10 @@
   "dependencies": {
     "d3": "^7.9.0",
     "electron-store": "^8.1.0",
-    "phylotree": "^2.2.1"
+    "fflate": "^0.8.2",
+    "html2canvas": "^1.4.1",
+    "phylotree": "^2.2.1",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^3.0.0",

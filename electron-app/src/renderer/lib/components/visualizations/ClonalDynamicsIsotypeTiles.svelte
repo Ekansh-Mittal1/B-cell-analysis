@@ -1,11 +1,15 @@
 <script lang="ts">
   import type { ClonalDynamicsEntry, IsotypeTileEntry } from '../../utils/public-clones';
   import { ISOTYPE_COLORS, ISOTYPE_ORDER } from '../../utils/public-clones';
+  import { exportHtmlAsPng } from '../../utils/export-figure';
 
   export let tileEntries: IsotypeTileEntry[] = [];
   export let timepointLabels: string[] = [];
   export let onCloneClick: (entry: ClonalDynamicsEntry, timepoint?: string) => void = () => {};
   export let dynamicsEntries: ClonalDynamicsEntry[] = [];
+  export let cohortLabel: string = '';
+
+  let tableContainer: HTMLElement;
 
   let hoveredCell: { row: number; col: number } | null = null;
   let tooltipText = '';
@@ -48,15 +52,21 @@
       onCloneClick(dynEntry, timepointLabels[colIdx]);
     }
   }
+
+  export async function exportPng() {
+    if (!tableContainer) return;
+    const name = cohortLabel ? `clonal_dynamics_isotype_${cohortLabel}.png` : 'clonal_dynamics_isotype.png';
+    await exportHtmlAsPng(tableContainer, name);
+  }
 </script>
 
-<div class="isotype-tiles-container">
+<div class="isotype-tiles-container" bind:this={tableContainer}>
   {#if tileEntries.length === 0}
     <div class="empty-state">No isotype data available.</div>
   {:else}
     {#if !hasAnyIsotypeData}
       <div class="no-isotype-banner">
-        No C gene (isotype) annotation found. Run a fresh analysis to populate isotype data — the pipeline assigns constant region calls (IgM, IgG, IgA, etc.) via C gene BLAST.
+        No C gene (isotype) annotation found in the current top clones. Try increasing the number of displayed clones, or run a fresh analysis if isotype data is missing entirely.
       </div>
     {/if}
     <div class="tiles-scroll">

@@ -296,6 +296,19 @@ export function getSessions(): SessionEntry[] {
 
 export function saveSession(entry: Omit<SessionEntry, 'id'>): SessionEntry {
   const sessions = getSessions();
+
+  // If a session with the same outputDir already exists, update it in place
+  const existingIndex = sessions.findIndex(s => s.outputDir === entry.outputDir);
+  if (existingIndex >= 0) {
+    const existing = sessions[existingIndex];
+    const updated: SessionEntry = { ...existing, ...entry, id: existing.id };
+    sessions.splice(existingIndex, 1); // remove old position
+    sessions.unshift(updated);          // move to top (most recent)
+    localStorage.setItem(SESSIONS_KEY, JSON.stringify(sessions));
+    return updated;
+  }
+
+  // Otherwise create a new session
   const newEntry: SessionEntry = {
     id: generateId(),
     ...entry

@@ -176,7 +176,7 @@ function initBackendRunner(): void {
     backendDir: backendPath,
     binDir: binPath,
     dataDir: dataPath,
-    pythonPath: 'python3' // Will be configurable later for bundled env
+    pythonPath: '/Library/Frameworks/Python.framework/Versions/3.13/bin/python3.13' // Use Python 3.13 where changeo/presto are installed
   });
 }
 

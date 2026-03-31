@@ -29,7 +29,8 @@ export function setupIpcHandlers(
   ipcMain.removeHandler('pipeline:stageFiles');
   ipcMain.removeHandler('pipeline:loadResults');
   ipcMain.removeHandler('pipeline:runPublicCloneAnalysis');
-  
+  ipcMain.removeHandler('pipeline:runCovidMatchingAnalysis');
+
   // Dialog: Select directory
   // Detects folder structure:
   //   Flat:    selected_dir/*.fasta  → files returned directly
@@ -498,6 +499,31 @@ export function setupIpcHandlers(
     });
   });
 
+  ipcMain.handle('pipeline:runCovidMatchingAnalysis', async (event, config: any) => {
+    console.log('[IPC] Running COVID matching analysis with config:', config);
+
+    return new Promise((resolve, reject) => {
+      const onResult = (data: any) => {
+        console.log('[IPC] COVID matching result:', data);
+        mainWindow?.webContents.send('pipeline:covidMatchResult', data);
+      };
+
+      const onComplete = (data: any) => {
+        console.log('[IPC] COVID matching analysis complete');
+        mainWindow?.webContents.send('pipeline:covidMatchComplete', data);
+        resolve(data);
+      };
+
+      const onError = (error: string) => {
+        console.error('[IPC] COVID matching analysis error:', error);
+        mainWindow?.webContents.send('pipeline:covidMatchError', error);
+        reject(new Error(error));
+      };
+
+      backendRunner.runCovidMatchingAnalysis(config, { onResult, onComplete, onError });
+    });
+  });
+
   // Read file contents
   ipcMain.handle('fs:readFile', async (_, filePath: string) => {
     try {
@@ -515,6 +541,17 @@ export function setupIpcHandlers(
   ipcMain.handle('fs:writeFile', async (_, filePath: string, content: string) => {
     try {
       fs.writeFileSync(filePath, content, 'utf-8');
+      return { success: true };
+    } catch (error: any) {
+      return { success: false, error: error.message };
+    }
+  });
+
+  // Write binary file contents (for zip export etc.)
+  ipcMain.handle('fs:writeBinaryFile', async (_, filePath: string, base64Data: string) => {
+    try {
+      const buffer = Buffer.from(base64Data, 'base64');
+      fs.writeFileSync(filePath, buffer);
       return { success: true };
     } catch (error: any) {
       return { success: false, error: error.message };

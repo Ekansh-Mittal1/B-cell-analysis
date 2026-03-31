@@ -132,6 +132,18 @@ interface ElectronAPI {
   onPipelineComplete: (callback: (data: CompleteData) => void) => () => void;
   onPipelineError: (callback: (data: ErrorData) => void) => () => void;
 
+  // COVID matching analysis
+  runCovidMatchingAnalysis: (config: {
+    output_dir: string;
+    cov_abdab_database_path: string;
+    top_n_clones?: number;
+  }) => Promise<{ success: boolean; error?: string }>;
+
+  // COVID matching events
+  onCovidMatchResult: (callback: (data: any) => void) => () => void;
+  onCovidMatchComplete: (callback: (data: any) => void) => () => void;
+  onCovidMatchError: (callback: (data: any) => void) => () => void;
+
   // Public clone analysis events
   onPublicCloneResult: (callback: (data: any) => void) => () => void;
   onPublicCloneComplete: (callback: (data: any) => void) => () => void;
@@ -140,6 +152,7 @@ interface ElectronAPI {
   // File system operations
   readFile: (filePath: string) => Promise<FileResult>;
   writeFile: (filePath: string, content: string) => Promise<{ success: boolean; error?: string }>;
+  writeBinaryFile: (filePath: string, base64Data: string) => Promise<{ success: boolean; error?: string }>;
   copyFile: (sourcePath: string, destPath: string) => Promise<{ success: boolean; error?: string }>;
   fileExists: (filePath: string) => Promise<boolean>;
   readDir: (dirPath: string) => Promise<{ success: boolean; files?: string[]; error?: string }>;

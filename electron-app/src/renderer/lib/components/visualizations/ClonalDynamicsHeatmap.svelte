@@ -1,10 +1,20 @@
 <script lang="ts">
   import type { ClonalDynamicsEntry, ClonalStatus } from '../../utils/public-clones';
+  import { exportSvgAsPng } from '../../utils/export-figure';
 
   export let entries: ClonalDynamicsEntry[] = [];
   export let timepointLabels: string[] = [];
   export let timepointTotals: { label: string; total: number }[] = [];
   export let onCloneClick: (entry: ClonalDynamicsEntry, timepoint?: string) => void = () => {};
+  export let cohortLabel: string = '';
+
+  let svgEl: SVGSVGElement;
+
+  export async function exportPng() {
+    if (!svgEl) return;
+    const name = cohortLabel ? `clonal_dynamics_heatmap_${cohortLabel}.png` : 'clonal_dynamics_heatmap.png';
+    await exportSvgAsPng(svgEl, name);
+  }
 
   let hoveredCell: { row: number; col: number } | null = null;
   let selectedRow: number | null = null;
@@ -78,7 +88,7 @@
       No multi-timepoint clones or lineages found.
     </div>
   {:else}
-    <svg width={svgWidth} height={svgHeight}>
+    <svg bind:this={svgEl} width={svgWidth} height={svgHeight} viewBox="0 0 {svgWidth} {svgHeight}">
       <!-- Column headers: timepoint labels -->
       {#each timepointLabels as tp, j}
         <text
